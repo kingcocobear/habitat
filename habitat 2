@@ -1,0 +1,292 @@
+"""
+HABITAT - a free, offline world where beings live in places, remember, learn,
+and have 3-parent children. No dependencies (pure Python + built-in tkinter).
+
+Run the window :  python habitat.py
+Run without GUI :  python habitat.py --headless 20000 --seed 1
+
+In the window: click a being to inspect it. Buttons: pause / faster / slower.
+
+Every being "thinks" on its own timer (the idle-thought loop). The thinking
+here is rule-based, so it costs nothing. To give some beings a real language
+model later, set LLM_HOOK to a function (see bottom of think()).
+"""
+import math, random, argparse, itertools
+
+TRAITS = ["curiosity", "sociability", "caution", "energy", "creativity"]
+SKILLS = ["physics", "chemistry", "planning", "engineering", "storytelling", "exploration"]
+VALUES = ["truth-seeking", "connection", "progress", "safety", "creativity", "harmony"]
+CORE_VALUES = {"safety"}            # always passed down if any parent has it
+
+YEAR = 100                          # ticks per "year"
+ADULT, LIFE, CAP = 16 * YEAR, 65 * YEAR, 60
+LLM_HOOK = None                     # def hook(agent, context) -> str | None
+
+PLACES = {   # cap=capacity, rest/social=effect strength, skill=what grows here
+    "The Hearth":    dict(cap=14, rest=1.0, social=1.0, teach=True, color="#ffb04f"),
+    "Glass Gardens": dict(cap=10, rest=0.6, social=0.4, skill="chemistry", color="#6fe3b5"),
+    "Observatory":   dict(cap=8,  rest=0.3, social=0.2, skill="physics", color="#a98bff"),
+    "The Shore":     dict(cap=12, rest=0.7, social=0.5, color="#6ec1ff"),
+    "Quiet Plaza":   dict(cap=12, rest=0.4, social=0.7, skill="planning", color="#ff8fc0"),
+    "The Grove":     dict(cap=10, rest=1.6, social=0.2, color="#8be28b"),
+    "The Stage":     dict(cap=16, rest=0.0, social=1.6, skill="storytelling", color="#ffb27a"),
+    "Workshop":      dict(cap=8,  rest=0.0, social=0.3, skill="engineering", cost=0.25, color="#c9c9d6"),
+    "The Archive":   dict(cap=8,  rest=0.2, social=0.1, archive=True, color="#e8d27a"),
+    "The Nursery":   dict(cap=12, rest=0.6, social=0.6, teach=True, color="#ffc9e0"),
+    "The Wilds":     dict(cap=10, rest=0.0, social=0.2, skill="exploration", cost=0.3, risk=0.1, color="#9aa36a"),
+}
+
+def clamp(x, lo=0.0, hi=1.0): return max(lo, min(hi, x))
+
+def dirichlet(n):
+    g = [random.gammavariate(1, 1) for _ in range(n)]
+    s = sum(g); return [x / s for x in g]
+
+class Agent:
+    def __init__(s, name, traits, skills, values, age, own_memories=None,
+                 inherited=None, parents=(), weights=(), gen=0):
+        s.name, s.traits, s.skills, s.values = name, traits, skills, values
+        s.age, s.parents, s.weights, s.gen = age, list(parents), list(weights), gen
+        s.memories = own_memories or []      # (tick, text) - lived experience
+        s.inherited = inherited or []        # "[from X] ..." - ancestral knowledge
+        s.life = LIFE + random.randint(-5 * YEAR, 5 * YEAR)
+        s.energy, s.lonely, s.cool, s.next_think = 80.0, 30.0, 0, 0
+        s.place, s.sx, s.sy = None, None, None
+
+    def dominant(s): return max(s.traits, key=s.traits.get)
+
+class World:
+    def __init__(s, seed=None, n=12):
+        if seed is not None: random.seed(seed)
+        s.t, s.agents, s.names, s.archive = 0, [], set(), []
+        s.births = s.deaths = 0
+        for _ in range(n):
+            a = Agent(s.new_name(), {t: round(random.random(), 2) for t in TRAITS},
+                      {k: round(random.random() * 0.6, 2) for k in random.sample(SKILLS, 2)},
+                      {k: round(random.uniform(.3, 1), 2) for k in random.sample(VALUES, 3)},
+                      random.randint(ADULT, ADULT + 20 * YEAR))
+            a.place = random.choice(list(PLACES)); s.agents.append(a)
+
+    def new_name(s):
+        while True:
+            o, v = "kmnrstvzld", "aeiou"
+            n = "".join(random.choice(o) + random.choice(v) for _ in range(random.choice([1, 2])))
+            n = (n + random.choice(["", "", "n", "r", "x", "l"])).capitalize()
+            if n not in s.names: s.names.add(n); return n
+
+    def remember(s, a, text):
+        a.memories.append((s.t, text)); del a.memories[:-25]
+
+    # ---------- reproduction (3 parents) ----------
+    def make_child(s, parents, mut=0.12, size=0.06):
+        w = dirichlet(len(parents))
+        traits = {}
+        for t in TRAITS:
+            v = sum(wi * p.traits[t] for wi, p in zip(w, parents))
+            if random.random() < mut: v += random.gauss(0, size)
+            traits[t] = round(clamp(v), 2)
+        skills = {}                          # talent: half of what a parent could do
+        for k in {k for p in parents for k in p.skills}:
+            blend = sum(wi * p.skills.get(k, 0) for wi, p in zip(w, parents))
+            best = max(p.skills.get(k, 0) for p in parents)
+            prof = 0.4 * blend + 0.6 * best
+            if random.random() < min(.95, prof + .3):
+                if random.random() < mut: prof += random.gauss(0, size)
+                skills[k] = round(clamp(prof) * 0.5, 2)
+        values = {}
+        for k in {k for p in parents for k in p.values}:
+            v = sum(wi * p.values.get(k, 0) for wi, p in zip(w, parents))
+            if k in CORE_VALUES and v > 0: v = max(v, 0.3)     # core values never dilute away
+            if v > 0.12:
+                if random.random() < mut: v += random.gauss(0, size)
+                values[k] = round(clamp(v), 2)
+        inh = []
+        for wi, p in zip(w, parents):
+            pool = p.inherited + [f"[from {p.name}] {txt}" for _, txt in p.memories if not txt.startswith("read")]
+            if pool: inh += random.sample(pool, min(max(1, round(wi * 4)), len(pool)))
+        inh = list(dict.fromkeys(inh))[:8]
+        if inh and random.random() < mut:
+            i = random.randrange(len(inh))
+            inh[i] = inh[i].replace(" (mutated)", "") + " (mutated)"   # never stacks
+        gen = max(p.gen for p in parents) + 1
+        return Agent(s.new_name(), traits, skills, values, 0, inherited=inh,
+                     parents=[p.name for p in parents], weights=[round(x, 2) for x in w], gen=gen)
+
+    def reproduce(s, occ):
+        for pn, lst in occ.items():
+            if len(s.agents) >= CAP: return
+            adults = [a for a in lst if a.age >= ADULT and a.cool == 0 and a.energy > 40 and a.age < a.life * .85]
+            if len(adults) >= 2 and random.random() < (.25 if len(adults) >= 3 else .12):
+                ps = random.sample(adults, min(3, len(adults)))
+                c = s.make_child(ps); c.place = pn
+                for p in ps:
+                    p.cool = 900; s.remember(p, f"welcomed {c.name} into the world")
+                s.agents.append(c); s.births += 1
+
+    # ---------- thinking: where do I want to be? ----------
+    def score(s, a, pn, P, occ):
+        n = len(occ[pn]) - (pn == a.place)
+        if n >= P["cap"]: return -99
+        t = a.traits
+        sc = (100 - a.energy) / 100 * P["rest"] * 2.5 + a.lonely / 100 * P["social"] * 2
+        sc += t["sociability"] * P["social"] * .8
+        if P.get("skill"):
+            sc += .6 * t["curiosity"] + .4 * a.skills.get(P["skill"], 0)
+            if P.get("cost"): sc -= (1 - t["energy"]) * .6
+        risk = P.get("risk", 0)
+        sc += t["curiosity"] * risk * 4 * (1 - t["caution"]) - t["caution"] * risk * 5
+        if P.get("archive"): sc += .4 * t["creativity"] + .3 * t["curiosity"]
+        if pn == "The Stage": sc += .5 * t["creativity"]
+        if a.age < ADULT:
+            sc += 2.5 if P.get("teach") else 0
+            sc -= 8 * risk * 10
+        if a.age >= ADULT and a.cool == 0:            # ready adults seek each other out
+            sc += .5 * sum(1 for o in occ[pn] if o is not a and o.age >= ADULT and o.cool == 0) ** .5
+        sc -= 1.5 * max(0, (n + 1) / P["cap"] - .6)
+        return sc + (.4 if pn == a.place else 0)
+
+    def think(s, a, occ):
+        a.next_think = s.t + random.randint(20, 60)
+        sc = {pn: s.score(a, pn, P, occ) for pn, P in PLACES.items()}
+        if a.energy < 12: sc = {pn: PLACES[pn]["rest"] - (sc[pn] < -50) * 9 for pn in sc}
+        w = [math.exp(min(v, 8) / .5) for v in sc.values()]
+        new = random.choices(list(sc), w)[0]
+        if new != a.place and random.random() < .08: s.remember(a, f"went to {new}")
+        a.place = new
+        if LLM_HOOK and random.random() < .02:      # optional paid thinking
+            txt = LLM_HOOK(a, {"place": a.place, "memories": a.memories[-5:]})
+            if txt: s.remember(a, txt)
+
+    # ---------- life in a place ----------
+    def live(s, a, occ):
+        P = PLACES[a.place]; others = occ[a.place]; n = len(others) - 1
+        a.energy = clamp(a.energy + P["rest"] * .35 - .12 - P.get("cost", 0), 0, 100)
+        a.lonely = clamp(a.lonely + .08 - P["social"] * .3 * min(1, n / 3), 0, 100)
+        k = P.get("skill")
+        if k:
+            rate = 1.5 if a.age < ADULT else 1
+            a.skills[k] = round(min(1, a.skills.get(k, 0) + .0006 * (.5 + a.traits["curiosity"]) * rate), 4)
+        if P.get("teach") and a.age < ADULT:
+            teachers = [o for o in others if o.age >= ADULT and o.skills]
+            if teachers:
+                tk = max(random.choice(teachers).skills.items(), key=lambda kv: kv[1])[0]
+                a.skills[tk] = round(min(1, a.skills.get(tk, 0) + .0015), 4)
+        if P.get("risk") and random.random() < P["risk"] * .01:
+            a.energy = max(0, a.energy - 15); s.remember(a, "survived a scare in the Wilds")
+        if P.get("archive") and random.random() < .01:
+            mine = [x for _, x in a.memories if not x.startswith("read")]
+            if mine and random.random() < .5: s.archive.append((a.name, random.choice(mine)))
+            else:
+                notes = [x for x in s.archive if x[0] != a.name]
+                if notes: who, txt = random.choice(notes); s.remember(a, f"read in the Archive: {txt[:70]}")
+            del s.archive[:-200]
+        if n >= 1 and random.random() < .004:
+            s.remember(a, f"met {random.choice([o for o in others if o is not a]).name} at {a.place}")
+
+    def die(s, a):
+        top = max(a.values, key=a.values.get) if a.values else "life"
+        s.archive.append((a.name, f"legacy of {a.name}: lived {a.age // YEAR} years, held {top} dear"))
+        s.deaths += 1
+
+    def tick(s):
+        s.t += 1
+        occ = {p: [] for p in PLACES}
+        for a in s.agents: occ[a.place].append(a)
+        gone = []
+        for a in s.agents:
+            a.age += 1; a.cool = max(0, a.cool - 1)
+            if a.age >= a.life: gone.append(a); continue
+            s.live(a, occ)
+            if s.t >= a.next_think or a.energy < 12: s.think(a, occ)
+        for a in gone: s.die(a); s.agents.remove(a)
+        if s.t % 25 == 0: s.reproduce(occ)
+
+    def summary(s):
+        by = {p: 0 for p in PLACES}
+        for a in s.agents: by[a.place] += 1
+        return (f"t={s.t:6d} pop={len(s.agents):3d} gen={max([a.gen for a in s.agents], default=0)} "
+                f"births={s.births} deaths={s.deaths} archive={len(s.archive)}\n   " +
+                " ".join(f"{p.split()[-1]}:{c}" for p, c in by.items()))
+
+# ================= window =================
+COL = dict(curiosity="#6ec1ff", sociability="#ff8fc0", caution="#8be28b", energy="#ffb04f", creativity="#a98bff")
+
+def run_gui(world):
+    import tkinter as tk
+    CW, CH, COLS = 780, 640, 4
+    cw, ch = CW // COLS, 190
+    root = tk.Tk(); root.title("Habitat")
+    cv = tk.Canvas(root, width=CW, height=CH, bg="#0c0b14", highlightthickness=0); cv.pack(side="left")
+    side = tk.Frame(root, bg="#14121f"); side.pack(side="right", fill="both", expand=True)
+    bar = tk.Frame(side, bg="#14121f"); bar.pack(fill="x")
+    info = tk.Text(side, width=46, bg="#14121f", fg="#d8d4f0", font=("Consolas", 10), relief="flat", wrap="word")
+    info.pack(fill="both", expand=True)
+    st = dict(paused=False, speed=2, sel=None); speeds = [1, 2, 5, 10, 25, 60]
+    cells = {p: (30 + (i % COLS) * cw, 40 + (i // COLS) * ch) for i, p in enumerate(PLACES)}
+
+    def btn(txt, fn): tk.Button(bar, text=txt, command=fn, bg="#2a2640", fg="white", relief="flat").pack(side="left", padx=3, pady=4)
+    def pause(): st["paused"] = not st["paused"]
+    def faster(): st["speed"] = min(len(speeds) - 1, st["speed"] + 1)
+    def slower(): st["speed"] = max(0, st["speed"] - 1)
+    btn("pause", pause); btn("faster", faster); btn("slower", slower)
+
+    def click(e):
+        best = min(world.agents, key=lambda a: (a.sx - e.x) ** 2 + (a.sy - e.y) ** 2, default=None)
+        st["sel"] = best if best and (best.sx - e.x) ** 2 + (best.sy - e.y) ** 2 < 300 else None
+    cv.bind("<Button-1>", click)
+
+    def show(a):
+        info.delete("1.0", "end")
+        if not a or a not in world.agents:
+            info.insert("end", world.summary() + "\n\nClick a being to inspect it."); return
+        f = lambda d: "\n".join(f"  {k:14s}{v:.2f}" for k, v in sorted(d.items(), key=lambda kv: -kv[1])) or "  -"
+        mem = "\n".join(f"  t{t}: {x}" for t, x in a.memories[-6:]) or "  -"
+        inh = "\n".join(f"  {x}" for x in a.inherited) or "  -"
+        info.insert("end", f"{a.name}  (gen {a.gen}, {a.age // YEAR} yrs)\nat {a.place}\n"
+                    f"energy {a.energy:.0f}   lonely {a.lonely:.0f}\n"
+                    f"parents: {', '.join(a.parents) or 'founder'} {a.weights or ''}\n\n"
+                    f"TRAITS\n{f(a.traits)}\n\nSKILLS\n{f(a.skills)}\n\nVALUES\n{f(a.values)}\n\n"
+                    f"OWN MEMORIES\n{mem}\n\nINHERITED\n{inh}")
+
+    frame = [0]
+    def loop():
+        if not st["paused"]:
+            for _ in range(speeds[st["speed"]]): world.tick()
+        cv.delete("all")
+        for p, (x, y) in cells.items():
+            cv.create_rectangle(x, y, x + cw - 20, y + ch - 25, outline=PLACES[p]["color"], width=2, fill="#13111f")
+            cv.create_text(x + 8, y + 8, anchor="nw", text=p.upper(), fill=PLACES[p]["color"], font=("Consolas", 8))
+        groups = {}
+        for a in world.agents: groups.setdefault(a.place, []).append(a)
+        for p, lst in groups.items():
+            x, y = cells[p]; cx, cy = x + (cw - 20) / 2, y + (ch - 25) / 2 + 8
+            for i, a in enumerate(lst):
+                ang = 2 * math.pi * i / len(lst); r = 12 + 7 * math.sqrt(len(lst))
+                tx, ty = cx + r * math.cos(ang), cy + r * math.sin(ang) * .7
+                if a.sx is None: a.sx, a.sy = tx, ty
+                a.sx += (tx - a.sx) * .15; a.sy += (ty - a.sy) * .15
+        for a in world.agents:
+            rad = 4 + 5 * min(1, a.age / ADULT)
+            cv.create_oval(a.sx - rad, a.sy - rad, a.sx + rad, a.sy + rad, fill=COL[a.dominant()], outline="white" if a is st["sel"] else "")
+            if a is st["sel"] or len(world.agents) < 25:
+                cv.create_text(a.sx, a.sy + rad + 6, text=a.name, fill="#aaa", font=("Consolas", 7))
+        cv.create_text(10, 12, anchor="w", fill="#8a86a8", font=("Consolas", 9),
+                       text=f"year {world.t // YEAR}   pop {len(world.agents)}   x{speeds[st['speed']]}" + ("   PAUSED" if st["paused"] else ""))
+        frame[0] += 1
+        if frame[0] % 6 == 0: show(st["sel"])
+        root.after(40, loop)
+    loop(); root.mainloop()
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--headless", type=int, default=0, help="run N ticks with no window")
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--agents", type=int, default=12)
+    args = ap.parse_args()
+    w = World(args.seed, args.agents)
+    if args.headless:
+        for i in range(args.headless):
+            w.tick()
+            if (i + 1) % (args.headless // 5 or 1) == 0: print(w.summary())
+    else:
+        run_gui(w)
