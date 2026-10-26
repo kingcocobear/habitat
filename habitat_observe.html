@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Habitat Observation Mode</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--tx:#1d1d1b;--mu:#6b6a64;--ln:#ddd9cf;--ac:#2f6f5e;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171816;--card:#222421;--tx:#ecebe6;--mu:#9a998f;--ln:#383a35;--ac:#6fc2a8}}
+:root[data-theme="dark"]{--bg:#171816;--card:#222421;--tx:#ecebe6;--mu:#9a998f;--ln:#383a35;--ac:#6fc2a8}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0 auto;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:12px;max-width:560px}
+h1{font-size:19px;margin:6px 0 2px}p.s{color:var(--mu);margin:0 0 10px;font-size:13px}
+canvas{width:100%;aspect-ratio:1/1;background:var(--card);border:1px solid var(--ln);border-radius:10px;display:block}
+.bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:10px 0}
+button{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:8px 12px;font-size:14px}
+button.g{background:var(--card);color:var(--tx);border:1px solid var(--ln)}
+label{font-size:13px;color:var(--mu);display:flex;align-items:center;gap:4px}
+#st{background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:8px 10px;font-size:13px;color:var(--mu)}
+#st b{color:var(--tx)}
+#log{margin-top:8px;font-size:12.5px;color:var(--mu);height:110px;overflow-y:auto;background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:6px 10px}
+</style>
+</head>
+<body>
+<h1>Observation Mode</h1>
+<p class="s">Agents have bodies, enjoy moving, and enjoy company. They can see each other's facing and hear a shared beat. Agents can also send short tones, and each agent is colored by the tone it favors. The world wraps around at the edges. Adults can have children (up to 3 parents blended, with mutation), and agents age and die. Population cap: 500. Nothing rewards circles, syncing, dancing, or any particular tone.</p>
+<canvas id="c" width="320" height="320"></canvas>
+<div class="bar">
+<button id="pp">Pause</button>
+<button class="g" data-sp="1">1x</button><button class="g" data-sp="4">4x</button><button class="g" data-sp="12">12x</button>
+<button class="g" id="rs">Reset</button>
+<button class="g" id="cp">Copy CSV</button>
+</div>
+<div class="bar">
+<label>start agents <input type="range" id="n" min="10" max="200" step="2" value="14"><b id="nv">14</b></label>
+<label><input type="checkbox" id="rhy" checked>rhythm sense</label>
+<label><input type="checkbox" id="mov" checked>movement reward</label>
+<label><input type="checkbox" id="soc" checked>company reward</label>
+<label><input type="checkbox" id="vis" checked>sight (see who faces where)</label>
+<label><input type="checkbox" id="beat" checked>shared beat</label>
+<label><input type="checkbox" id="voice" checked>voices</label>
+<label><input type="checkbox" id="imit" checked>copy what they hear</label>
+<label><input type="checkbox" id="birth" checked>births and aging</label>
+<label>copy strength <input type="range" id="ck" min="0" max="50" value="15"><b id="ckv">0.15</b></label>
+<label>max group size <input type="range" id="gl" min="10" max="200" step="5" value="50"><b id="glv">50</b></label>
+<label>max share per tone (by group) <input type="range" id="tc" min="20" max="100" step="5" value="40"><b id="tcv">40%</b></label>
+</div>
+<div id="st"></div>
+<div id="log"></div>
+<script>
+let N=14,S=520;const VIEW=60,CL=26,CAP=500,MAT=1500,LIFE=14000;let births=0,deaths=0,maxGen=0,grid=[],GC=1,copyK=.15,toneCap=.4,groupLimit=50;
+let ag,t=0,run=true,speed=1,ringLogged=false,timer;
+const R=Math.random,TAU=Math.PI*2;
+const opt={rhy:true,mov:true,soc:true,vis:true,beat:true,voice:true,imit:true,birth:true};let beat=0,rows=[];const HEAR=70;
+function mk(){return{x:20+R()*(S-40),y:20+R()*(S-40),a:R()*TAU,ph:R()*TAU,om:.08+R()*.04,
+ wS:.3+R()*.4,wN:.2+R()*.3,sp:.8+R()*.8,rw:0,win:0,prev:-1,old:null,pr:Array.from({length:6},()=>.5+R()),vt:-99,vl:0,age:R()*5000|0,cool:0,gen:0,leave:0,la:0}}
+function init(){rows=[];births=0;deaths=0;maxGen=0;S=Math.max(520,Math.round(85*Math.sqrt(N)));const cv=document.getElementById('c');cv.width=S;cv.height=S;ag=Array.from({length:N},mk);beat=0;t=0;ringLogged=false;document.getElementById('log').innerHTML='';log('New world, '+N+' agents.')}
+function log(s){const l=document.getElementById('log'),d=document.createElement('div');d.textContent='t'+t+' · '+s;l.prepend(d);while(l.children.length>40)l.lastChild.remove()}
+function buildGrid(){GC=Math.max(1,Math.floor(S/HEAR));const cs=S/GC;grid=Array.from({length:GC*GC},()=>[]);for(const a of ag){grid[Math.min(GC-1,a.y/cs|0)*GC+Math.min(GC-1,a.x/cs|0)].push(a)}}
+function nearby(a){const cs=S/GC,gx=Math.min(GC-1,a.x/cs|0),gy=Math.min(GC-1,a.y/cs|0),seen=new Set(),out=[];
+ for(let i=-1;i<=1;i++)for(let j=-1;j<=1;j++){const k=((gy+j+GC)%GC)*GC+((gx+i+GC)%GC);if(seen.has(k))continue;seen.add(k);const c=grid[k];for(let m=0;m<c.length;m++)out.push(c[m])}return out}
+function lifecycle(){if(!opt.birth)return;const kids=[];
+ for(const a of ag){if(a.age<MAT||a.cool>0||ag.length+kids.length>=CAP||R()>.004)continue;
+  let crowd=0;const mates=[];
+  for(const b of nearby(a)){if(b===a)continue;const d=Math.hypot(wd(b.x-a.x),wd(b.y-a.y));if(d<40)crowd++;if(d<35&&b.age>=MAT&&b.cool===0)mates.push(b)}
+  if(crowd>10||!mates.length)continue;
+  const ps=[a];while(ps.length<3&&mates.length)ps.push(mates.splice(R()*mates.length|0,1)[0]);
+  const w=ps.map(()=>-Math.log(R()||1e-9)),ws=w.reduce((x,y)=>x+y,0);
+  const bl=k=>ps.reduce((q,p,i)=>q+p[k]*w[i]/ws,0);
+  const c=mk();c.x=(a.x+(R()-.5)*14+S)%S;c.y=(a.y+(R()-.5)*14+S)%S;c.age=0;
+  c.wS=Math.max(0,Math.min(1.2,bl('wS')+(R()-.5)*.1));c.wN=Math.max(.02,Math.min(.8,bl('wN')+(R()-.5)*.1));
+  c.sp=Math.max(.3,Math.min(2,bl('sp')+(R()-.5)*.15));c.om=Math.max(.04,bl('om')+(R()-.5)*.01);
+  c.pr=c.pr.map((_,i)=>Math.max(.05,ps.reduce((q,p,j)=>q+p.pr[i]*w[j]/ws,0)+(R()-.5)*.2));const z=c.pr.reduce((x,y)=>x+y,0);c.pr=c.pr.map(x=>x/z*6);
+  c.gen=Math.max(...ps.map(p=>p.gen))+1;maxGen=Math.max(maxGen,c.gen);
+  ps.forEach(p=>p.cool=900);kids.push(c);births++}
+ ag.push(...kids);const before=ag.length;ag=ag.filter(a=>a.age<LIFE);deaths+=before-ag.length}
+function groupsNow(){const n=ag.length,p=Array.from({length:n},(_,i)=>i),idx=new Map();ag.forEach((a,i)=>idx.set(a,i));
+ const f=i=>{while(p[i]!==i){p[i]=p[p[i]];i=p[i]}return i};
+ for(let i=0;i<n;i++){const a=ag[i];for(const b of nearby(a)){const j=idx.get(b);if(j>i&&Math.hypot(wd(a.x-b.x),wd(a.y-b.y))<CL)p[f(i)]=f(j)}}
+ const g={};for(let i=0;i<n;i++)(g[f(i)]=g[f(i)]||[]).push(ag[i]);return Object.values(g)}
+function flip(g,low){for(const a of g){a.pr[low]=Math.max(...a.pr)+.6;const z=a.pr.reduce((x,y)=>x+y,0);for(let i=0;i<6;i++)a.pr[i]=a.pr[i]/z*6}}
+function limitGroups(){if(groupLimit>=200)return;
+ for(const g of groupsNow()){if(g.length<=groupLimit)continue;
+  const bw=g.map(a=>({a,x:wd(a.x-g[0].x),y:wd(a.y-g[0].y)}));const cx=bw.reduce((q,o)=>q+o.x,0)/bw.length,cy=bw.reduce((q,o)=>q+o.y,0)/bw.length;
+  bw.sort((o,p)=>Math.hypot(p.x-cx,p.y-cy)-Math.hypot(o.x-cx,o.y-cy));
+  for(let i=0;i<g.length-groupLimit;i++){const o=bw[i];o.a.leave=100;o.a.la=Math.atan2(o.y-cy,o.x-cx)+(R()-.5)*1.2}}}
+function balance(){if(toneCap>=1||ag.length<6)return;const gs=groupsNow().filter(g=>g.length>=3);if(gs.length<2)return;
+ const info=gs.map(g=>{const c=[0,0,0,0,0,0];g.forEach(a=>c[dom(a)]++);let m=0;for(let i=1;i<6;i++)if(c[i]>c[m])m=i;return{g,m}});
+ const tot=info.reduce((q,x)=>q+x.g.length,0),sh=[0,0,0,0,0,0];info.forEach(x=>sh[x.m]+=x.g.length);
+ for(let k=0;k<6;k++){const mine=info.filter(x=>x.m===k).sort((x,y)=>x.g.length-y.g.length);if(mine.length<2)continue;
+  for(const x of mine){if(sh[k]<=toneCap*tot)break;let low=0;for(let i=1;i<6;i++)if(sh[i]<sh[low])low=i;if(low===k)break;
+   flip(x.g,low);sh[k]-=x.g.length;sh[low]+=x.g.length;x.m=low}}}
+function wd(v){return v>S/2?v-S:v<-S/2?v+S:v}
+function step(){t++;beat+=.1;buildGrid();if(t%250===0)setTimeout(record,0);
+for(const a of ag){a.age++;if(a.cool>0)a.cool--;if(a.leave>0)a.leave--;let cx=0,cy=0,n=0,rx=0,ry=0,sx=0,sy=0;
+ for(const b of nearby(a)){if(b===a)continue;const dx=wd(b.x-a.x),dy=wd(b.y-a.y),d=Math.hypot(dx,dy);
+  if(d<20&&d>0){rx-=dx/d*(20-d)/20;ry-=dy/d*(20-d)/20}
+  if(d<VIEW){const da=Math.atan2(dy,dx)-a.a;if(!opt.vis||Math.cos(da)>-.33){n++;cx+=dx;cy+=dy;sx+=Math.sin(b.ph-a.ph)}}}
+ let vx=Math.cos(a.a),vy=Math.sin(a.a);
+ if(n){const m=Math.hypot(cx,cy)||1;vx+=a.wS*.4*cx/m;vy+=a.wS*.4*cy/m}
+ vx+=rx*2.2;vy+=ry*2.2;if(a.leave>0){vx=Math.cos(a.la)*2+rx*2.2;vy=Math.sin(a.la)*2+ry*2.2}
+ const na=(R()-.5)*a.wN*1.2;a.a=Math.atan2(vy,vx)+na;
+ a.ph+=a.om+(opt.rhy&&n?.04*sx/n:0)+(opt.beat?.03*Math.sin(beat-a.ph):0);
+ const v=a.sp*(.6+.4*(.5+.5*Math.sin(a.ph)));
+ a.x=(a.x+Math.cos(a.a)*v+S)%S;a.y=(a.y+Math.sin(a.a)*v+S)%S;
+ const r=(opt.mov?v/1.6:0)+(opt.soc?Math.min(n,4)/4:0);
+ a.rw=a.rw*.98+r*.02;a.win+=r;
+ if(opt.voice&&R()<.02){let q=R()*a.pr.reduce((x,y)=>x+y,0),k=0;while(k<5&&(q-=a.pr[k])>0)k++;a.vt=t;a.vl=k;
+  if(opt.imit)for(const b of nearby(a)){if(b!==a&&Math.hypot(wd(b.x-a.x),wd(b.y-a.y))<HEAR){b.pr[k]+=copyK;const z=b.pr.reduce((x,y)=>x+y,0);for(let i=0;i<6;i++)b.pr[i]=b.pr[i]/z*6}}}
+ if(t%80===0){ // simple trial-and-keep learning on the agent's OWN reward
+  const score=a.win/80;a.win=0;
+  if(a.old&&score<a.prev){a.wS=a.old.wS;a.wN=a.old.wN;a.sp=a.old.sp}
+  a.prev=Math.max(score,a.old&&score<a.prev?a.prev:score);
+  a.old={wS:a.wS,wN:a.wN,sp:a.sp};
+  a.wS=Math.max(0,Math.min(1.2,a.wS+(R()-.5)*.1));a.wN=Math.max(.02,Math.min(.8,a.wN+(R()-.5)*.1));a.sp=Math.max(.3,Math.min(2,a.sp+(R()-.5)*.15))}}
+ lifecycle();if(t%25===0){limitGroups();balance()}
+}
+function dom(a){let k=0;for(let i=1;i<6;i++)if(a.pr[i]>a.pr[k])k=i;return k}
+function record(){const m=metrics();rows.push([t,ag.length,m.groups,m.big,m.sync.toFixed(2),m.ring.toFixed(2),m.distinct,m.top.toFixed(2),m.gagree.toFixed(2),births,deaths,maxGen].join(','));
+ log('groups '+m.groups+' · largest '+m.big+' · sync '+m.sync.toFixed(2)+' · tones in use '+m.distinct+' · top tone '+(m.top*100|0)+'% · in-group agreement '+(m.gagree*100|0)+'% · pop '+ag.length+' · gen '+maxGen)}
+function metrics(){if(!ag.length)return{sync:0,groups:0,big:0,ring:0,distinct:0,top:0,gagree:0};let sx=0,sy=0;for(const a of ag){sx+=Math.cos(a.ph);sy+=Math.sin(a.ph)}
+ const sync=Math.hypot(sx,sy)/ag.length;
+ const p=ag.map((_,i)=>i);const f=i=>p[i]===i?i:(p[i]=f(p[i]));
+ for(let i=0;i<ag.length;i++)for(let j=i+1;j<ag.length;j++)if(Math.hypot(wd(ag[i].x-ag[j].x),wd(ag[i].y-ag[j].y))<CL)p[f(i)]=f(j);
+ const g={};for(let i=0;i<ag.length;i++){(g[f(i)]=g[f(i)]||[]).push(ag[i])}
+ const groups=Object.values(g);groups.sort((a,b)=>b.length-a.length);
+ const big=groups[0];let ring=0;
+ if(big.length>=5){const bw=big.map(a=>({x:wd(a.x-big[0].x),y:wd(a.y-big[0].y)}));const cx=bw.reduce((s,a)=>s+a.x,0)/bw.length,cy=bw.reduce((s,a)=>s+a.y,0)/bw.length;
+  const d=bw.map(a=>Math.hypot(a.x-cx,a.y-cy)),m=d.reduce((s,x)=>s+x,0)/d.length;
+  const sd=Math.sqrt(d.reduce((s,x)=>s+(x-m)**2,0)/d.length);
+  const an=bw.map(a=>Math.atan2(a.y-cy,a.x-cx)).sort((x,y)=>x-y);let gap=0;
+  for(let i=0;i<an.length;i++){const nx=i+1<an.length?an[i+1]:an[0]+TAU;gap=Math.max(gap,nx-an[i])}
+  ring=gap<2.3?Math.max(0,1-sd/m):0}
+ const cnt=[0,0,0,0,0,0];ag.forEach(a=>cnt[dom(a)]++);
+ let gs=0,gn=0;for(const g of groups){if(g.length<3)continue;const c=[0,0,0,0,0,0];g.forEach(a=>c[dom(a)]++);gs+=Math.max(...c);gn+=g.length}
+ return{sync,groups:groups.length,big:big.length,ring,distinct:cnt.filter(x=>x>0).length,top:Math.max(...cnt)/ag.length,gagree:gn?gs/gn:0}}
+function draw(){const c=document.getElementById('c').getContext('2d');c.clearRect(0,0,S,S);if(opt.beat){c.strokeStyle='rgba(111,194,168,'+(.15+.45*(.5+.5*Math.sin(beat)))+')';c.lineWidth=6;c.strokeRect(0,0,S,S);c.lineWidth=1}
+ for(const a of ag){c.fillStyle='hsl('+(dom(a)*60)+',70%,52%)';c.beginPath();c.arc(a.x,a.y,Math.max(3,5*S/320)*(a.age<MAT?.7:1),0,TAU);c.fill();
+  if(t-a.vt<14){c.lineWidth=2.5;c.strokeStyle='hsl('+(a.vl*60)+',90%,45%)';c.beginPath();c.arc(a.x,a.y,7+(t-a.vt)*1.3,0,TAU);c.stroke();c.lineWidth=1}
+  c.strokeStyle='rgba(120,120,120,.7)';c.beginPath();c.moveTo(a.x,a.y);c.lineTo(a.x+Math.cos(a.a)*9,a.y+Math.sin(a.a)*9);c.stroke()}
+ const m=metrics();
+ document.getElementById('st').innerHTML='tick <b>'+t+'</b> · groups <b>'+m.groups+'</b> · largest <b>'+m.big+'</b> · rhythm sync <b>'+m.sync.toFixed(2)+'</b> · ring-ness <b>'+m.ring.toFixed(2)+'</b><br>voices: tones in use <b>'+m.distinct+'</b> · top tone <b>'+(m.top*100|0)+'%</b> · in-group agreement <b>'+(m.gagree*100|0)+'%</b><br>population <b>'+ag.length+'/'+CAP+'</b> · births <b>'+births+'</b> · deaths <b>'+deaths+'</b> · newest generation <b>'+maxGen+'</b>';
+ if(m.ring>.8&&!ringLogged){ringLogged=true;log('ring-like group of '+m.big+' (sync '+m.sync.toFixed(2)+')')}
+ if(m.ring<.4)ringLogged=false}
+function loop(){clearInterval(timer);timer=setInterval(()=>{if(run){for(let i=0;i<speed;i++)step();draw()}},50)}
+document.getElementById('pp').onclick=e=>{run=!run;e.target.textContent=run?'Pause':'Resume'};
+document.querySelectorAll('[data-sp]').forEach(b=>b.onclick=()=>{speed=+b.dataset.sp});
+document.getElementById('rs').onclick=()=>{init()};
+document.getElementById('cp').onclick=()=>{const csv='tick,agents,groups,largest,sync,ring,tones_in_use,top_tone_share,in_group_agreement,births,deaths,max_generation\n'+rows.join('\n');
+ try{navigator.clipboard.writeText(csv).then(()=>log('CSV copied ('+rows.length+' rows)'),()=>show(csv))}catch(e){show(csv)}};
+function show(csv){let ta=document.getElementById('ta');if(!ta){ta=document.createElement('textarea');ta.id='ta';ta.style.cssText='width:100%;height:120px;margin-top:8px;font-size:12px';document.body.appendChild(ta)}ta.value=csv;ta.select()}
+['rhy','mov','soc','vis','beat','voice','imit','birth'].forEach(k=>document.getElementById(k).onchange=e=>{opt[k]=e.target.checked;log(k+' '+(opt[k]?'on':'off'))});
+document.getElementById('n').onchange=e=>{N=+e.target.value;document.getElementById('nv').textContent=N;init();draw()};
+document.getElementById('ck').oninput=e=>{copyK=+e.target.value/100;document.getElementById('ckv').textContent=copyK.toFixed(2)};
+document.getElementById('tc').oninput=e=>{toneCap=+e.target.value/100;document.getElementById('tcv').textContent=toneCap>=1?'no cap':e.target.value+'%'};
+document.getElementById('gl').oninput=e=>{groupLimit=+e.target.value;document.getElementById('glv').textContent=groupLimit>=200?'no limit':groupLimit};
+init();draw();loop();
+</script>
+</body>
+</html>
