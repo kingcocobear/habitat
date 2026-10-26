@@ -28,6 +28,10 @@ try:
     import gallery as GALLERY        # turns the beings' art and songs into a web page for humans (optional)
 except ImportError:
     GALLERY = None
+try:
+    import guests as GUESTS          # lets real AI minds (OLMo via Ollama, or any program over localhost) live here (optional)
+except ImportError:
+    GUESTS = None
 
 TRAITS = ["curiosity", "sociability", "caution", "energy", "creativity"]
 SKILLS = ["physics", "chemistry", "planning", "engineering", "storytelling", "exploration", "drawing", "music"]
@@ -123,7 +127,8 @@ def exp_to_dict(e):
             "landings": e.landings, "trips": e.trips, "far": e.far, "steps": e.steps,
             "wonders": e.wonders, "goal": list(e.goal) if e.goal else None,
             "route": sorted(list(p) for p in e.route), "reached": e.reached,
-            "homebound": e.homebound, "meta": e.meta, "rng": [v, list(st), g]}
+            "homebound": e.homebound, "meta": e.meta, "dna": e.dna, "form": e.form, "form_left": e.form_left,
+            "strain": e.strain, "scans": e.scans, "morphs": e.morphs, "backlashes": e.backlashes, "rng": [v, list(st), g]}
 
 def exp_from_dict(d):
     e = COSMOS.Explorer(d["name"], d["t"], random.Random())
@@ -134,6 +139,8 @@ def exp_from_dict(d):
     e.wonders, e.goal = d.get("wonders", []), tuple(d["goal"]) if d.get("goal") else None
     e.route, e.reached = {tuple(p) for p in d.get("route", [])}, d.get("reached", False)
     e.homebound, e.meta = d.get("homebound", False), d.get("meta", {})
+    e.dna, e.form, e.form_left, e.strain = d.get("dna", {}), d.get("form"), d.get("form_left", 0), d.get("strain", 0)
+    e.scans, e.morphs, e.backlashes = d.get("scans", 0), d.get("morphs", 0), d.get("backlashes", 0)
     v, st, g = d["rng"]; e.r.setstate((v, tuple(st), g))
     return e
 
@@ -424,6 +431,12 @@ class World:
             return
         a.fame += .6 + .5 * math.sqrt(len(ds))
         s.remember(a, f"came home from the stars after charting {n} systems")
+        if e.dna:                                               # field notes: a new creature from the scanner, drawn from memory
+            sp, info = next(iter(e.dna.items()))
+            s.remember(a, f"scanned {len(e.dna)} kinds of animal with the DNA scanner, including the {sp} ({info['trait']})")
+            s.archive.append((a.name, f"field notes: the {sp} on {info['planet']} gives a {info['trait']} form"))
+            if a.pages > 0 and a.pencil > 0:
+                s.sketch(a, "among the stars", f"a {sp}, a {info['trait']} creature", bonus=.1)
         for d in ds[:3]: s.archive.append((a.name, f"discovered {d} among the stars"))
         s.archive.append((a.name, f"star log: charted {n} systems, as far as {e.far:.0f} cells from home"))
         del s.archive[:-200]
@@ -476,6 +489,7 @@ class World:
 
     def think(s, a, occ):
         a.next_think = s.t + random.randint(20, 60)
+        if GUESTS and getattr(s, "guests", None) and GUESTS.drive(s, a, occ): return      # a guest mind is steering this being
         sc = {pn: s.score(a, pn, P, occ) for pn, P in PLACES.items()}
         if a.energy < 12: sc = {pn: PLACES[pn]["rest"] - (sc[pn] < -50) * 9 for pn in sc}
         w = [math.exp(min(v, 8) / .5) for v in sc.values()]
@@ -593,7 +607,7 @@ def sprite_look(a):
     return dict(skin=r.choice(SKIN), hair=r.choice(HAIR), style=r.randrange(4), eyes=r.choice(["#1a1a2e", "#2a4d3a", "#3a2a1a", "#244a7a"]),
                 pants=r.choice(["#2f3b5c", "#3d2f45", "#394a3a", "#4a3a2a"]))
 
-def sprite_grid(a, frame=0, face=1, child=False, look=None):
+def sprite_grid(a, frame=0, face=1, child=False, look=None, shirt=None):
     """14 wide x 18 tall grid of colours (None = see-through). frame 0/1 = walking steps, face = 1 right, -1 left."""
     look = look or sprite_look(a); W_, H_ = 14, 18
     g = [[None] * W_ for _ in range(H_)]
@@ -602,7 +616,7 @@ def sprite_grid(a, frame=0, face=1, child=False, look=None):
     def rect(x0, y0, x1, y1, c):
         for yy in range(y0, y1 + 1):
             for xx in range(x0, x1 + 1): px(xx, yy, c)
-    shirt = COL[a.dominant()]; skin, hair = look["skin"], look["hair"]
+    shirt = shirt or COL[a.dominant()]; skin, hair = look["skin"], look["hair"]
     # legs (swap a step every frame)
     lift = frame % 2
     rect(4, 13, 5, 15 - lift, look["pants"]); rect(8, 13, 9, 14 + lift + 1, look["pants"])
@@ -645,6 +659,8 @@ def run_gui(world, save_path=None, gallery_path=None):
     cv = tk.Canvas(root, width=CW, height=CH, bg="#0c0b14", highlightthickness=0); cv.pack(side="left")
     side = tk.Frame(root, bg="#14121f"); side.pack(side="right", fill="both", expand=True)
     bar = tk.Frame(side, bg="#14121f"); bar.pack(fill="x")
+    talk = tk.Text(side, width=46, height=8, bg="#100e1a", fg="#cfc9e6", font=("Consolas", 9), relief="flat", wrap="word", cursor="arrow")
+    talk.pack(side="bottom", fill="x")
     info = tk.Text(side, width=46, bg="#14121f", fg="#d8d4f0", font=("Consolas", 10), relief="flat", wrap="word")
     info.pack(fill="both", expand=True)
     st = dict(paused=False, speed=2, sel=None, sprites=True); speeds = [1, 2, 5, 10, 25, 60]
@@ -710,10 +726,26 @@ def run_gui(world, save_path=None, gallery_path=None):
                     f"sketches {a.sketches}, books filled {a.books}, works in gallery {works}\n"
                     f"songs: {'; '.join(x.split(' (')[0] for x in a.songs) or 'none'}\n"
                     f"wonders seen in person: {len(a.wonders_seen)}\n"
+                    + (f"DNA form: {a.expedition.form} ({a.expedition.form_left} jumps), library {len(a.expedition.dna)}\n" if a.expedition else "") +
                     f"parents: {', '.join(a.parents) or 'founder'} {a.weights or ''}\n\n"
                     f"TRAITS\n{f(a.traits)}\n\nSKILLS\n{f(a.skills)}\n\nVALUES\n{f(a.values)}\n\n"
                     f"OWN MEMORIES\n{mem}\n\nINHERITED\n{inh}")
 
+    shown_chat = [None]
+    def goto(name):
+        a = world.by_name(name)
+        if a: st["sel"] = a
+    def refresh_talk():
+        chat = list(getattr(world, "chat", []))[-12:]
+        if chat == shown_chat[0]: return
+        shown_chat[0] = chat
+        talk.config(state="normal"); talk.delete("1.0", "end")
+        talk.insert("end", "WHAT GUESTS ARE SAYING (click a name to go to them)\n" if chat else "No guests yet. Start with --ai or --serve.\n")
+        for i, (nm, tx) in enumerate(chat):
+            tag = f"n{i}"; talk.insert("end", nm, tag); talk.tag_config(tag, foreground="#d9c7ff", underline=True)
+            talk.tag_bind(tag, "<Button-1>", lambda e, n=nm: goto(n))
+            talk.insert("end", f": {tx}\n")
+        talk.see("end"); talk.config(state="disabled")
     frame = [0]
     def loop():
         if not st["paused"]:
@@ -721,7 +753,8 @@ def run_gui(world, save_path=None, gallery_path=None):
         if save_path and world.t - last[0] >= 2000: world.save(path); last[0] = world.t
         cv.delete("all")
         for p, (x, y) in cells.items():
-            cv.create_rectangle(x, y, x + cw - 20, y + ch - 25, outline=PLACES[p]["color"], width=2, fill="#13111f")
+            here = st["sel"] is not None and st["sel"].place == p and not st["sel"].expedition     # the place of the chosen being lights up
+            cv.create_rectangle(x, y, x + cw - 20, y + ch - 25, outline="white" if here else PLACES[p]["color"], width=4 if here else 2, fill="#13111f")
             cv.create_text(x + 8, y + 8, anchor="nw", text=p.upper(), fill=PLACES[p]["color"], font=("Consolas", 8))
         groups = {}
         for a in world.agents:
@@ -758,7 +791,7 @@ def run_gui(world, save_path=None, gallery_path=None):
         cv.create_text(10, 12, anchor="w", fill="#8a86a8", font=("Consolas", 9),
                        text=f"year {world.t // YEAR}   pop {len(world.agents)} ({sum(1 for a in world.agents if a.expedition)} away)   art {len(world.gallery)}   x{speeds[st['speed']]}" + ("   PAUSED" if st["paused"] else ""))
         frame[0] += 1
-        if frame[0] % 6 == 0: show(st["sel"])
+        if frame[0] % 6 == 0: show(st["sel"]); refresh_talk()
         root.after(40, loop)
     loop(); root.mainloop()
 
@@ -770,14 +803,23 @@ if __name__ == "__main__":
     ap.add_argument("--save", metavar="FILE", help="save the world here (on exit, and every 2000 ticks in the window)")
     ap.add_argument("--load", metavar="FILE", help="resume a saved world")
     ap.add_argument("--gallery", metavar="FILE", help="write the beings' art gallery as a web page (open it in any browser)")
+    ap.add_argument("--ai", metavar="MODEL", help="let a local Ollama model (e.g. olmo2:7b) live in the world as a guest being")
+    ap.add_argument("--ai-names", default="Olmo", help="comma-separated names for the guest beings (default Olmo)")
+    ap.add_argument("--ollama-url", default="http://localhost:11434/api/chat")
+    ap.add_argument("--serve", type=int, metavar="PORT", help="open a localhost door so other AI programs can join as guests")
+    ap.add_argument("--pace", type=float, default=0, help="with --headless: seconds to wait per tick (so guests can keep up)")
     args = ap.parse_args()
     try:
         w = World.load(args.load) if args.load else World(args.seed, args.agents)
     except (OSError, ValueError, KeyError) as e:
         raise SystemExit(f"Could not load '{args.load}': {e}")
+    if GUESTS and (args.ai or args.serve):
+        for line in GUESTS.setup(w, args): print(line)
     if args.headless:
+        import time
         for i in range(args.headless):
             w.tick()
+            if args.pace: time.sleep(args.pace)
             if (i + 1) % (args.headless // 5 or 1) == 0: print(w.summary())
         if args.save: w.save(args.save); print("saved to", args.save)
         if args.gallery:
