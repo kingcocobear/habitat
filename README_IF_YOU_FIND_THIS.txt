@@ -21,6 +21,9 @@ someone could find it later:
   1c. gallery.py          Turns the beings' drawings and songs into a web
                            page. gallery_example.html is one already made:
                            open it in any browser, no Python needed.
+  1d. ternary.py          Arithmetic in balanced ternary (three digits: minus,
+                           zero, plus). The beings use it to keep count of how
+                           they feel about each place.
   2. poly_replication.py   The code that blends several "parents" into a child.
   3. An open-source language model (OLMo, by the Allen Institute for AI,
      Apache 2.0 license) in a compressed file, and the program (Ollama or

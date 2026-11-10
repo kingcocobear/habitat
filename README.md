@@ -13,6 +13,8 @@ their needs and personalities, learn skills, remember, and have children with
 | `companion_test.py` | Chat with a local language model (OLMo) through Ollama |
 | `cosmos.py` | A procedurally generated universe: a seed number creates endless star systems. `habitat.py` sends bold beings out from the Wilds to explore it; it also runs on its own |
 | `gallery.py` | Turns the beings' sketches, star charts and songs into one web page anyone can open (used by `habitat.py --gallery`) |
+| `ternary.py` | Balanced ternary math: numbers written with three digits, minus, zero and plus, the way the Soviet Setun computer (1958) counted. `habitat.py` uses it for the beings' feelings about places; it also runs on its own |
+| `test_ternary.py` | Checks for `ternary.py` and the feelings in `habitat.py`. Run `python test_ternary.py` |
 | `gallery_example.html` | A finished example gallery from a 30,000-tick world. Open it in any browser, no Python needed. Press *listen* to hear the songs |
 | `habitat_observe.html` | A separate browser experiment: do simple agents develop shared rhythm, "dialects," and groups? Open it in any browser |
 | `README_IF_YOU_FIND_THIS.txt` | A plain-language note for anyone who finds this archive later |
@@ -68,7 +70,7 @@ python cosmos.py --system 3 -2 5    # describe one place in the universe
 python cosmos.py --map 0            # ASCII star map
 ```
 
-`habitat.py` imports `cosmos.py` and `gallery.py` when they sit in the same folder. Without them the habitat still runs, just with no expeditions and no gallery page.
+`habitat.py` imports `cosmos.py`, `gallery.py` and `ternary.py` when they sit in the same folder. Without them the habitat still runs, just with no expeditions, no gallery page and no feelings about places.
 
 ## Honest limits
 
@@ -120,3 +122,29 @@ understand the beings are programs; the server refuses visits, speech and waves 
 links, emails and phone numbers, and an optional `blocked_words.txt` (one word per line) blocks more.
 IMPORTANT: this is a self-declaration, not age verification, and the word filter is basic. Before inviting the public you need
 real age assurance, real moderation (reporting, muting, logs, humans reviewing), and legal advice for where you operate.
+
+
+## Ternary minds (added)
+Beings now form feelings about places, and those feelings are counted in **balanced ternary**: each digit is `-` (minus one),
+`0`, or `+` (plus one), the number system of the Soviet Setun computer. `ternary.py` does the arithmetic digit by digit.
+
+- Each being keeps a small tally per place, six ternary digits long (for example `0000+-` is +2).
+- Good moments add to it: a find in the Wilds (+3), a sketch that makes the gallery wall, playing for listeners, building
+  something, meeting someone (+1 each).
+- Bad moments subtract: a scare in the Wilds (-4), wearing yourself out (-2), being packed into a full place or being
+  lonely and alone there (-1 each).
+- The **sign** of the tally is the being's opinion: `+` likes the place, `0` no opinion, `-` would rather not. Only the sign
+  counts when the being decides where to go, and it is a nudge (`FEEL_W` in `habitat.py`), not an order.
+- Every five years of a being's life each feeling drifts one step back toward zero, so old joys and old scares wear off.
+
+Click a being to see its feelings. They are saved with the world, and older save files still load. In testing over
+8 worlds of 25,000 ticks, population, births, art and songs stayed in the same range as before; what changes is that
+individual beings develop favourite places and places they steer clear of.
+
+```bash
+python ternary.py            # see balanced ternary in action
+python ternary.py 42 -17     # write two numbers in ternary and add them
+python test_ternary.py       # run the checks
+```
+
+This is ordinary software doing three-valued math on a normal computer. It is not a ternary chip and makes nothing faster.

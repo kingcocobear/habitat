@@ -32,6 +32,10 @@ try:
     import guests as GUESTS          # lets real AI minds (OLMo via Ollama, or any program over localhost) live here (optional)
 except ImportError:
     GUESTS = None
+try:
+    import ternary as TERNARY        # balanced ternary math (-, 0, +), the way the Setun computer counted (optional)
+except ImportError:
+    TERNARY = None
 
 TRAITS = ["curiosity", "sociability", "caution", "energy", "creativity"]
 SKILLS = ["physics", "chemistry", "planning", "engineering", "storytelling", "exploration", "drawing", "music"]
@@ -65,6 +69,8 @@ SONG_KINDS = ["tune", "song", "lullaby", "dance", "march"]
 SONG_MOODS = ["gentle", "bright", "slow", "restless", "happy", "wistful"]
 SONG_ABOUT = ["the Shore", "the Wilds", "the stars", "the Hearth", "an old friend", "the first rain", "the long walk home"]
 LLM_HOOK = None                     # def hook(agent, context) -> str | None
+FEEL_W = .3                         # how hard a liking (+) or dislike (-) for a place pulls on where a being goes
+FEEL_FADE = 5 * YEAR                # every this many ticks of a being's life, each feeling drifts one step back toward 0
 
 PLACES = {   # cap=capacity, rest/social=effect strength, skill=what grows here
     "The Hearth":    dict(cap=14, rest=1.0, social=1.0, teach=True, music=.6, color="#ffb04f"),
@@ -101,6 +107,7 @@ class Agent:
         s.instruments, s.songs, s.wonders_seen = [], [], []
         s.mats, s.sketches, s.books, s.engaged = 0.0, 0, 0, 0
         s.expedition = None                              # a cosmos Explorer while away among the stars
+        s.feelings = {}                                  # place -> a 6-trit balanced ternary tally, e.g. "0000+-" (see ternary.py)
         s.place, s.sx, s.sy = None, None, None
 
     def dominant(s): return max(s.traits, key=s.traits.get)
@@ -147,6 +154,7 @@ def exp_from_dict(d):
 def agent_to_dict(a):
     d = {k: getattr(a, k) for k in AGENT_FIELDS}
     d["memories"] = [list(m) for m in a.memories]
+    d["feelings"] = dict(a.feelings)
     d["expedition"] = exp_to_dict(a.expedition) if a.expedition else None
     return d
 
@@ -159,6 +167,8 @@ def agent_from_dict(d):
         if k in d: setattr(a, k, d[k])              # older / web saves lack these; the defaults are a starter kit
     a.instruments, a.songs = list(d.get("instruments", [])), list(d.get("songs", []))
     a.wonders_seen = list(d.get("wonders_seen", []))
+    a.feelings = {p: v for p, v in d.get("feelings", {}).items()          # older saves have none; that is fine
+                  if p in PLACES and isinstance(v, str) and v and set(v) <= set("+0-")}
     if d.get("expedition") and COSMOS: a.expedition = exp_from_dict(d["expedition"])
     a.place = d["place"] if d["place"] in PLACES else random.choice(list(PLACES))
     return a
@@ -216,6 +226,28 @@ class World:
 
     def remember(s, a, text):
         a.memories.append((s.t, text)); del a.memories[:-25]
+
+    # ---------- feelings about places, kept in balanced ternary ----------
+    def feel(s, a, pn, trit, weight=1):
+        """Something good (+1) or bad (-1) happened to this being at a place. The tally is a 6-trit number."""
+        if not TERNARY or pn not in PLACES: return
+        m = TERNARY.TernaryMind(a.feelings.get(pn, "0")).vote(trit, weight)
+        if m.value: a.feelings[pn] = m.to_save()
+        else: a.feelings.pop(pn, None)
+
+    def opinion(s, a, pn):
+        """The sign of the tally is the being's opinion: +1 likes it, 0 no opinion, -1 would rather not."""
+        if not TERNARY or pn not in a.feelings: return 0
+        return TERNARY.TernaryMind(a.feelings[pn]).decide()
+
+    def fade(s, a):
+        """Every few years each feeling drifts one step back toward 0, so old joys and old scares wear off."""
+        for pn in list(a.feelings): s.feel(a, pn, -s.opinion(a, pn))
+
+    def feelings_text(s, a):
+        if not a.feelings: return "none yet"
+        word = {1: "likes", 0: "", -1: "avoids"}
+        return ", ".join(f"{p} {v} {word[s.opinion(a, p)]}".strip() for p, v in sorted(a.feelings.items()))
 
     # ---------- reproduction (3 parents) ----------
     def make_child(s, parents, mut=0.12, size=0.06):
@@ -294,6 +326,7 @@ class World:
         q = .5 * ds + .3 * a.traits["creativity"] + .25 * random.random() + bonus
         extra = {"inspired_by": inspired} if inspired else {}
         if q > .34 and s.hang(a, "sketch", what, pn, q, **extra):
+            s.feel(a, pn, 1)
             if random.random() < .5:
                 s.remember(a, f"drew {what}" + (f", inspired by {inspired['artist']}'s work" if inspired else f" at {pn}") + "; it hangs in the gallery")
         elif random.random() < .15: s.remember(a, f"sketched {what} at {pn}")
@@ -333,6 +366,7 @@ class World:
                     s.remember(o, f"answered {short} with a tune of their own")
                     s.remember(a, f"{o.name} answered my {short} with a tune of their own"); a.fame += .1
         if audience:
+            s.feel(a, a.place, 1)
             a.fame += .08 * math.sqrt(len(audience))
             if random.random() < .12: s.remember(a, f"played the {inst} for {len(audience)} listeners")
 
@@ -345,7 +379,7 @@ class World:
             a.instruments.append(ins); a.fame += .5; what = f"a {ins}"
         else:
             what = random.choice(WORKSHOP_ITEMS); a.items += 1; a.fame += .7
-        s.remember(a, f"made {what} in the Workshop")
+        s.remember(a, f"made {what} in the Workshop"); s.feel(a, a.place, 1)
 
     def launch(s, a):
         e = COSMOS.Explorer(a.name, dict(a.traits), random.Random(random.randint(1, 10 ** 9)))
@@ -485,11 +519,14 @@ class World:
         if a.age >= ADULT and a.cool == 0:            # ready adults seek each other out
             sc += .5 * sum(1 for o in occ[pn] if o is not a and o.age >= ADULT and o.cool == 0) ** .5
         sc -= 1.5 * max(0, (n + 1) / P["cap"] - .6)
+        sc += FEEL_W * s.opinion(a, pn)               # ternary mind: +1 likes this place, 0 no opinion, -1 would rather not
         return sc + (.4 if pn == a.place else 0) + (1.2 if pn == a.place and a.engaged > 0 else 0)
 
     def think(s, a, occ):
         a.next_think = s.t + random.randint(20, 60)
         if GUESTS and getattr(s, "guests", None) and GUESTS.drive(s, a, occ): return      # a guest mind is steering this being
+        if a.lonely > 70 and len(occ[a.place]) <= 1: s.feel(a, a.place, -1)      # lonely and alone here
+        if len(occ[a.place]) >= PLACES[a.place]["cap"]: s.feel(a, a.place, -1)   # packed in shoulder to shoulder
         sc = {pn: s.score(a, pn, P, occ) for pn, P in PLACES.items()}
         if a.energy < 12: sc = {pn: PLACES[pn]["rest"] - (sc[pn] < -50) * 9 for pn in sc}
         w = [math.exp(min(v, 8) / .5) for v in sc.values()]
@@ -504,12 +541,14 @@ class World:
     def live(s, a, occ):
         P = PLACES[a.place]; others = occ[a.place]; n = len(others) - 1
         cost = P.get("cost", 0) * (1 - min(.5, .1 * a.items))        # tools make hard work easier
+        was = a.energy
         a.energy = clamp(a.energy + P["rest"] * .35 - .12 - cost, 0, 100)
+        if a.energy < 12 <= was: s.feel(a, a.place, -1, 2)            # wore myself out here
         a.bored = clamp(a.bored + .08 * (.5 + a.traits["curiosity"]) - P.get("novel", 0) * .30, 0, 100)
         a.fame = max(0.0, a.fame - .0005)
         if a.engaged > 0: a.engaged -= 1
         if P.get("finds") and a.age >= ADULT and random.random() < .004 * (.5 + a.traits["curiosity"]) * (.5 + a.skills.get("exploration", 0)):
-            f = random.choice(WILDS_FINDS); a.fame += 1.0; s.remember(a, f"found {f} in the Wilds")
+            f = random.choice(WILDS_FINDS); a.fame += 1.0; s.remember(a, f"found {f} in the Wilds"); s.feel(a, a.place, 1, 3)
             if random.random() < .5: s.archive.append((a.name, f"found {f} in the Wilds")); del s.archive[:-200]
             if a.pages > 0 and a.pencil > 0 and random.random() < .6: s.sketch(a, a.place, f)    # a find is worth drawing
         if P.get("gather") and a.age >= 8 * YEAR and a.mats < 8 and random.random() < P["gather"] * (.4 + a.traits["energy"]):
@@ -538,7 +577,7 @@ class World:
                 tk = max(random.choice(teachers).skills.items(), key=lambda kv: kv[1])[0]
                 a.skills[tk] = round(min(1, a.skills.get(tk, 0) + .0015), 4)
         if P.get("risk") and random.random() < P["risk"] * .01:
-            a.energy = max(0, a.energy - 15); s.remember(a, "survived a scare in the Wilds")
+            a.energy = max(0, a.energy - 15); s.remember(a, "survived a scare in the Wilds"); s.feel(a, a.place, -1, 4)
         if P.get("archive") and random.random() < .01:
             mine = [x for _, x in a.memories if not x.startswith("read")]
             if mine and random.random() < .5: s.archive.append((a.name, random.choice(mine)))
@@ -547,7 +586,7 @@ class World:
                 if notes: who, txt = random.choice(notes); s.remember(a, f"read in the Archive: {txt[:70]}")
             del s.archive[:-200]
         if n >= 1 and random.random() < .004:
-            s.remember(a, f"met {random.choice([o for o in others if o is not a]).name} at {a.place}")
+            s.remember(a, f"met {random.choice([o for o in others if o is not a]).name} at {a.place}"); s.feel(a, a.place, 1)
 
     def die(s, a):
         e = a.expedition
@@ -572,6 +611,7 @@ class World:
         gone = []
         for a in s.agents:
             a.age += 1; a.cool = max(0, a.cool - 1)
+            if a.feelings and a.age % FEEL_FADE == 0: s.fade(a)
             if a.age >= a.life: gone.append(a); continue
             if a.expedition: s.fly(a, gone); continue          # away among the stars
             s.live(a, occ)
@@ -726,6 +766,7 @@ def run_gui(world, save_path=None, gallery_path=None):
                     f"sketches {a.sketches}, books filled {a.books}, works in gallery {works}\n"
                     f"songs: {'; '.join(x.split(' (')[0] for x in a.songs) or 'none'}\n"
                     f"wonders seen in person: {len(a.wonders_seen)}\n"
+                    f"feelings (ternary - 0 +): {world.feelings_text(a)}\n"
                     + (f"DNA form: {a.expedition.form} ({a.expedition.form_left} jumps), library {len(a.expedition.dna)}\n" if a.expedition else "") +
                     f"parents: {', '.join(a.parents) or 'founder'} {a.weights or ''}\n\n"
                     f"TRAITS\n{f(a.traits)}\n\nSKILLS\n{f(a.skills)}\n\nVALUES\n{f(a.values)}\n\n"
