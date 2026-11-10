@@ -245,6 +245,7 @@ class World:
         for pn in list(a.feelings): s.feel(a, pn, -s.opinion(a, pn))
 
     def feelings_text(s, a):
+        """One line for the inspector, e.g. 'The Grove 00000+ likes, The Wilds 0000-- avoids'."""
         if not a.feelings: return "none yet"
         word = {1: "likes", 0: "", -1: "avoids"}
         return ", ".join(f"{p} {v} {word[s.opinion(a, p)]}".strip() for p, v in sorted(a.feelings.items()))
@@ -523,10 +524,12 @@ class World:
         return sc + (.4 if pn == a.place else 0) + (1.2 if pn == a.place and a.engaged > 0 else 0)
 
     def think(s, a, occ):
+        scheduled = s.t >= a.next_think              # False when an exhausted being is re-thinking every tick
         a.next_think = s.t + random.randint(20, 60)
         if GUESTS and getattr(s, "guests", None) and GUESTS.drive(s, a, occ): return      # a guest mind is steering this being
-        if a.lonely > 70 and len(occ[a.place]) <= 1: s.feel(a, a.place, -1)      # lonely and alone here
-        if len(occ[a.place]) >= PLACES[a.place]["cap"]: s.feel(a, a.place, -1)   # packed in shoulder to shoulder
+        if scheduled:                                # feelings form once per normal decision, not once per tick
+            if a.lonely > 70 and len(occ[a.place]) <= 1: s.feel(a, a.place, -1)      # lonely and alone here
+            if len(occ[a.place]) >= PLACES[a.place]["cap"]: s.feel(a, a.place, -1)   # packed in shoulder to shoulder
         sc = {pn: s.score(a, pn, P, occ) for pn, P in PLACES.items()}
         if a.energy < 12: sc = {pn: PLACES[pn]["rest"] - (sc[pn] < -50) * 9 for pn in sc}
         w = [math.exp(min(v, 8) / .5) for v in sc.values()]

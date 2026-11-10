@@ -108,6 +108,7 @@ def negate(a):
 
 
 def subtract(a, b):
+    """a minus b: negate b, then add."""
     return add(a, negate(b))
 
 
@@ -134,6 +135,7 @@ def sign(a):
 # Three-valued logic: -1 = no / false, 0 = unknown / maybe, +1 = yes / true.
 
 def t_not(a):
+    """Yes becomes no, no becomes yes, and maybe stays maybe."""
     return -a
 
 
@@ -143,6 +145,7 @@ def t_and(a, b):
 
 
 def t_or(a, b):
+    """True if either is true; 'maybe' if unsure; false only if both are."""
     return max(a, b)
 
 
@@ -169,9 +172,11 @@ class TernaryMind:
     LIMIT = (3 ** TRYTE - 1) // 2      # 364
 
     def __init__(self, tally="0"):
+        """Start from a saved tally such as '0000+-', or from zero."""
         self.trits = to_trits(from_str(tally))
 
     def vote(self, trit, weight=1):
+        """Add one vote (-1, 0 or +1) with a whole-number weight. Returns self so votes can be chained."""
         if trit not in (-1, 0, 1):
             raise ValueError("a vote must be -1, 0 or +1")
         if weight < 0:
@@ -183,32 +188,39 @@ class TernaryMind:
         return self
 
     def decide(self):
+        """The decision is the sign of the tally: +1, 0 or -1."""
         return sign(self.trits)
 
     def reset(self):
+        """Clear the tally back to zero."""
         self.trits = [0]
         return self
 
     @property
     def value(self):
+        """The tally as an ordinary whole number."""
         return from_trits(self.trits)
 
     def __str__(self):
+        """The tally as six trit characters, padded with zeros on the left."""
         text = "".join(TRIT_CHARS[t] for t in reversed(self.trits))
         return text.rjust(TRYTE, "0")
 
     # save / load as plain text so it drops into a JSON save file
     def to_save(self):
+        """Text form for a save file."""
         return str(self)
 
     @classmethod
     def from_save(cls, text):
+        """Rebuild a mind from its saved text."""
         return cls(text)
 
 
 # ---------------------------------------------------------------- self-test
 
 def self_test():
+    """Check every operation against ordinary arithmetic. Returns how many checks ran."""
     checks = 0
     for n in range(-400, 401):
         assert from_trits(to_trits(n)) == n
@@ -259,6 +271,7 @@ def self_test():
 
 
 def demo():
+    """Print a few numbers, a sum and a vote in balanced ternary."""
     print("Balanced ternary: each digit is - (minus one), 0, or + (plus one)\n")
     for n in (0, 1, 2, 3, 8, 42, -42, 364):
         print(f"  {n:>5}  =  {to_str(n)}")
@@ -274,6 +287,7 @@ def demo():
 
 
 def main(argv):
+    """Command line: no arguments for the demo, --test for the self-test, or numbers to convert."""
     if "--test" in argv:
         print(f"ternary self-test passed ({self_test()} checks)")
         return 0

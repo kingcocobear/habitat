@@ -14,6 +14,7 @@ import habitat as H
 passed = 0
 
 def ok(cond, what):
+    """Stop with a message if a check fails; otherwise count it and print it."""
     global passed
     if not cond: raise SystemExit(f"FAILED: {what}")
     passed += 1
@@ -39,6 +40,7 @@ ok("Nowhere" not in a.feelings, "feelings about places that do not exist are ign
 occ = {p: [] for p in H.PLACES}
 for x in w.agents: occ[x.place].append(x)
 def score_with(pn, text):
+    """Score a place for the test being as if this were its only feeling."""
     saved = dict(a.feelings)
     a.feelings = {pn: text} if text else {}
     v = w.score(a, pn, H.PLACES[pn], occ)
@@ -53,6 +55,18 @@ w.fade(a)
 ok(a.feelings == {"The Shore": "0000+-", "The Wilds": "0000-0"}, "fading moves every feeling one step toward 0")
 for _ in range(5): w.fade(a)
 ok(a.feelings == {}, "feelings fade away completely and are then forgotten")
+
+b = w.agents[1]
+b.feelings, b.place, b.lonely, b.energy = {}, "The Grove", 90.0, 5.0
+alone = {p: [] for p in H.PLACES}; alone["The Grove"] = [b]
+b.next_think = w.t
+w.think(b, alone)                                    # a normal, scheduled decision
+first = H.TERNARY.from_str(b.feelings.get("The Grove", "0"))
+for _ in range(25):                                  # exhausted: think() is called again every tick
+    b.place, b.lonely = "The Grove", 90.0
+    w.think(b, alone)
+ok(first == -1 and H.TERNARY.from_str(b.feelings.get("The Grove", "0")) == -1,
+   "an exhausted being re-thinking every tick does not pile up dislikes")
 
 text = w.feelings_text(a)
 w.feel(a, "The Grove", 1)
