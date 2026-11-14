@@ -16,6 +16,7 @@ their needs and personalities, learn skills, remember, and have children with
 | `ternary.py` | Balanced ternary math: numbers written with three digits, minus, zero and plus, the way the Soviet Setun computer (1958) counted. `habitat.py` uses it for the beings' feelings about places; it also runs on its own |
 | `test_ternary.py` | Checks for `ternary.py` and the feelings in `habitat.py`. Run `python test_ternary.py` |
 | `pencil_lab.html` | The Pencil Lab: try the beings' pencil yourself (pressure, curve, grade, tilt, paper grain) and copy your settings into the habitat. Open it in any browser |
+| `perception_test.py` | Habitat Perception Experiment 001: shows an AI the same place four ways (picture, picture made of 1s and 0s, text grid map, plain words) and scores which way it understands best, for how many tokens. Run `python perception_test.py --selftest`, then `--model YOUR_MODEL` |
 | `gallery_example.html` | A finished example gallery from a 30,000-tick world. Open it in any browser, no Python needed. Press *listen* to hear the songs |
 | `habitat_observe.html` | A separate browser experiment: do simple agents develop shared rhythm, "dialects," and groups? Open it in any browser |
 | `README_IF_YOU_FIND_THIS.txt` | A plain-language note for anyone who finds this archive later |
@@ -158,3 +159,18 @@ Every artist now draws with a real pencil model instead of plain lines. The same
 - To hand everyone **your** pencil, open `pencil_lab.html` (or `/pencil` while `--serve` is running), tune it until it feels right, press **Copy settings for the habitat**, save the text as `pencil.json`, then run:
   `python habitat.py --headless 20000 --pencil pencil.json --gallery gallery.html`
   Every being then draws with your settings, each holding the pencil a little differently.
+## Perception Experiment 001 (added)
+What is the best way to show a habitat place to an AI guest? `perception_test.py` makes a small walled place (trees, a pond, food, other beings, and you) and shows it four ways:
+- **picture**: a top-down image (needs a vision model such as `gemma3`, `llava` or `qwen2.5vl` in Ollama)
+- **binary**: the same image, drawn entirely out of 1s and 0s
+- **grid**: a text map, `#` for walls, `T` for trees, `~` for water, `F` for food, `@` for other beings and `A` for you
+- **words**: a plain description, like guests get now
+
+The AI answers the same 4-5 questions about each version: counting, what's nearest, which direction, which is farther, and whether there's a wall. It's scored on right answers, tokens used and seconds per answer.
+```
+python perception_test.py --selftest                      # checks the test itself, no model needed
+python perception_test.py --save-scenes scenes/           # look at the scenes yourself
+python perception_test.py --model gemma3:4b --scenes 10    # the real run
+python perception_test.py --model qwen2.5:3b --text-only   # a model without vision: grid vs words
+```
+Every answer is saved to `perception_results.json`. Scenes come from seeds, so the same seeds give the same test every time, and two models can be compared fairly.
