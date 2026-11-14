@@ -174,3 +174,12 @@ python perception_test.py --model gemma3:4b --scenes 10    # the real run
 python perception_test.py --model qwen2.5:3b --text-only   # a model without vision: grid vs words
 ```
 Every answer is saved to `perception_results.json`. Scenes come from seeds, so the same seeds give the same test every time, and two models can be compared fairly.
+
+## Radios and hands-free calls (added)
+**Radios in the world.** Beings can make a radio in the Workshop, and most explorers pack one before they leave. With a radio, a being sometimes calls a friend in another place to share its latest news, which helps with loneliness. Explorers call home when they find something. The farther they are from Home Haven, the more static eats their words (`f~un~ a p~rfectly r~und lake`), and past a certain distance only static gets through. Radio chatter is saved with the world.
+
+**Hands-free calls.** A human in the live viewer (`--serve`) can pick any being and press 📻 **call** to ask it something.
+- **AI guests** answer on a separate line, like a headset, so the call never pauses what they're doing in the world. They keep choosing places and acting while the answer comes back. The call goes into their memories.
+- **Ordinary beings** answer from what they're doing and remember, if they have a radio. If they don't, the call says so.
+- **Outside AI programs** pick up calls with `GET /calls?name=NAME` and answer with `POST /answer {"name", "call", "answer"}`, without stopping their `/act` loop.
+- The same rules as chat apply: 18+ gate, no links or contact details, one call every few seconds, at most 3 calls waiting per guest, and a call drops after 2 minutes with no answer.

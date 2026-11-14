@@ -49,6 +49,7 @@ WILDS_FINDS = ["a hidden spring", "strange footprints", "an old wreck", "a field
 WORKSHOP_ITEMS = ["a lantern", "a better tool", "a small engine", "a map frame", "a kite", "a water filter"]
 INSTRUMENTS = ["flute", "drum", "lyre", "music box", "whistle"]
 PAGES, PENCIL_LIFE = 40, 25          # a fresh notebook has 40 pages; a pencil lasts 25 sketches
+RADIO_RANGE = 10                     # at this distance from Home Haven, half the words get through (explorers roam ~0-25)
 EXP_RATE = 6                         # an expedition makes one jump every 6 ticks
 MAX_AWAY = .22                       # at most this share of the population is off exploring
 SKETCH = {
@@ -107,6 +108,7 @@ class Agent:
         s.instruments, s.songs, s.wonders_seen = [], [], []
         s.mats, s.sketches, s.books, s.engaged = 0.0, 0, 0, 0
         s.expedition = None                              # a cosmos Explorer while away among the stars
+        s.radio = False                                  # made in the Workshop; lets a being talk across the habitat and from the stars
         s.feelings = {}                                  # place -> a 6-trit balanced ternary tally, e.g. "0000+-" (see ternary.py)
         s.place, s.sx, s.sy = None, None, None
 
@@ -115,7 +117,7 @@ class Agent:
 SAVE_VERSION = 1
 AGENT_FIELDS = ["name", "traits", "skills", "values", "age", "parents", "weights", "gen", "life",
                 "energy", "lonely", "cool", "next_think", "place", "inherited", "bored", "fame", "items",
-                "pages", "pencil", "instruments", "songs", "mats", "sketches", "books", "engaged", "wonders_seen"]
+                "pages", "pencil", "instruments", "songs", "mats", "sketches", "books", "engaged", "wonders_seen", "radio"]
 
 def chart_pts(e, limit=80):
     pts = sorted(list(p) for p in e.visited)
@@ -163,7 +165,7 @@ def agent_from_dict(d):
               own_memories=[tuple(m) for m in d["memories"]], inherited=d["inherited"],
               parents=d["parents"], weights=d["weights"], gen=d["gen"])
     for k in ("life", "energy", "lonely", "cool", "next_think"): setattr(a, k, d[k])
-    for k in ("bored", "fame", "items", "pages", "pencil", "mats", "sketches", "books", "engaged"):
+    for k in ("bored", "fame", "items", "pages", "pencil", "mats", "sketches", "books", "engaged", "radio"):
         if k in d: setattr(a, k, d[k])              # older / web saves lack these; the defaults are a starter kit
     a.instruments, a.songs = list(d.get("instruments", [])), list(d.get("songs", []))
     a.wonders_seen = list(d.get("wonders_seen", []))
@@ -181,6 +183,7 @@ class World:
         s.cosmos_seed = random.randint(1, 10 ** 6)
         s.cosmos = COSMOS.Cosmos(s.cosmos_seed) if COSMOS else None
         s.gallery, s.songbook, s.art_n = [], {}, 0          # works on the gallery wall, songs beings have composed
+        s.radio_log = []                                    # (tick, from, to, text): the last things said over the radio
         for _ in range(n):
             a = Agent(s.new_name(), {t: round(random.random(), 2) for t in TRAITS},
                       {k: round(random.random() * 0.6, 2) for k in random.sample(SKILLS, 2)},
@@ -199,7 +202,7 @@ class World:
     def to_dict(s):
         v, st, g = random.getstate()
         return {"version": SAVE_VERSION, "t": s.t, "births": s.births, "deaths": s.deaths,
-                "cosmos_seed": s.cosmos_seed, "gallery": s.gallery, "songbook": s.songbook, "art_n": s.art_n, "names": sorted(s.names), "archive": [list(x) for x in s.archive],
+                "cosmos_seed": s.cosmos_seed, "gallery": s.gallery, "songbook": s.songbook, "art_n": s.art_n, "names": sorted(s.names), "archive": [list(x) for x in s.archive], "radio_log": [list(x) for x in s.radio_log],
                 "agents": [agent_to_dict(a) for a in s.agents], "rng": [v, list(st), g]}
 
     def save(s, path):
@@ -219,6 +222,7 @@ class World:
         w.cosmos = COSMOS.Cosmos(w.cosmos_seed) if COSMOS else None
         w.gallery, w.songbook = d.get("gallery", []), d.get("songbook", {})
         w.art_n = d.get("art_n", len(w.gallery))
+        w.radio_log = [tuple(x) for x in d.get("radio_log", [])]          # older saves have no radio chatter
         w.agents = [agent_from_dict(x) for x in d["agents"]]
         w.names.update(a.name for a in w.agents)
         if "rng" in d: v, st, g = d["rng"]; random.setstate((v, tuple(st), g))
@@ -376,6 +380,8 @@ class World:
         a.mats -= 1
         if a.pencil <= 0: a.pencil = PENCIL_LIFE; what = "a new pencil"
         elif a.pages <= 0: a.pages = PAGES; what = "a fresh notebook"
+        elif not a.radio and random.random() < .25:
+            a.radio = True; a.fame += .3; what = "a radio"
         elif len(a.instruments) < 3 and (not a.instruments or random.random() < .3):
             ins = random.choice([i for i in INSTRUMENTS if i not in a.instruments])
             a.instruments.append(ins); a.fame += .5; what = f"a {ins}"
@@ -387,14 +393,49 @@ class World:
         e = COSMOS.Explorer(a.name, dict(a.traits), random.Random(random.randint(1, 10 ** 9)))
         e.skill = max(e.skill, round(a.skills.get("exploration", 0), 2)); e.steps = 0
         a.expedition = e
+        if not a.radio and random.random() < .6:          # most explorers pack a radio so they can call home
+            a.radio = True; s.remember(a, "packed a radio for the trip")
         s.remember(a, "set out from the Wilds to explore the stars")
 
     def fly(s, a, gone):
         e = a.expedition
         if s.t % EXP_RATE: return
+        found = len(e.discoveries)
         e.step(s.cosmos); e.steps += 1
+        if a.radio and e.alive and (len(e.discoveries) > found or random.random() < .04): s.radio_home(a, e)
         if not e.alive: gone.append(a)
         elif e.trips >= 1: s.land_home(a)
+
+    # ---------- radios ----------
+    def log_radio(s, frm, to, text):
+        s.radio_log.append((s.t, frm, to, text)); del s.radio_log[:-60]
+
+    def radio_call(s, a):
+        """A being with a radio calls a friend in another place who also has one, and shares their latest news."""
+        friends = [b for b in s.agents if b is not a and b.radio and not b.expedition and b.place != a.place]
+        if not friends: return
+        known = [b for b in friends if any(b.name in t for _, t in a.memories[-30:])]
+        b = random.choice(known or friends)
+        news = next((t for _, t in reversed(a.memories) if not t.startswith(("radioed", "heard on the radio", "radio from", "went to", "chose to go"))), "")
+        msg = f"I'm at {a.place}" + (f"; I {news}" if news else "; just checking in")
+        a.lonely = max(0, a.lonely - 8); b.lonely = max(0, b.lonely - 8)
+        s.remember(a, f"radioed {b.name} at {b.place}")
+        s.remember(b, f"heard on the radio from {a.name} at {a.place}: {news or 'just checking in'}")
+        s.log_radio(a.name, b.name, msg)
+
+    def radio_home(s, a, e):
+        """An explorer calls home. The farther from Home Haven, the more static eats the words."""
+        if e.discoveries and random.random() < .7: news = f"found {e.discoveries[-1]}"
+        else: news = f"made jump {e.jumps}; {len(e.visited)} systems charted so far"
+        dist = math.dist(e.pos, COSMOS.HOME) if hasattr(COSMOS, "HOME") else 0
+        signal = 1 / (1 + dist / RADIO_RANGE)
+        msg = "".join(c if c == " " or random.random() < signal + .1 else "~" for c in news)
+        if signal < .3: msg = "(only static)"
+        home = [b for b in s.agents if b.radio and not b.expedition and b is not a]
+        for b in random.sample(home, min(3, len(home))):
+            s.remember(b, f"radio from {a.name} among the stars: {msg}")
+            if msg != "(only static)": b.lonely = max(0, b.lonely - 4)
+        s.log_radio(a.name, "everyone at home", msg + f" (signal {signal:.0%})")
 
     def note(s, pc, text):
         pc.setdefault("notes", []).append(text); del pc["notes"][:-3]
@@ -570,6 +611,8 @@ class World:
                 and sum(1 for x in s.agents if x.expedition) < MAX_AWAY * len(s.agents):
             s.launch(a)
         if P.get("art") and s.gallery and random.random() < .02: s.react(a)      # look at the work on the wall
+        if a.radio and a.age >= ADULT and random.random() < .003 * (.3 + a.traits["sociability"]) * (1 + a.lonely / 50):
+            s.radio_call(a)
         a.lonely = clamp(a.lonely + .08 - P["social"] * .3 * min(1, n / 3), 0, 100)
         k = P.get("skill")
         if k:

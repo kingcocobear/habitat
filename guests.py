@@ -17,6 +17,11 @@ HTTP API (JSON):
   GET  /observe?name=Pip                           -> {"scene": "...", "places": [...], "here": [...]}
   POST /act    {"name": "Pip", "go": "The Shore", "say": "hello"}   -> {"ok": true}
   GET  /chat                                       -> the last 30 things anyone said
+  GET  /calls?name=Pip                             -> hands-free questions waiting for this guest
+  POST /answer {"name": "Pip", "call": 3, "answer": "..."}     -> answer one, while still acting in the world
+
+Hands-free calls: a human can radio any being with a question (POST /call). An AI guest answers on a separate line,
+so its mission in the world keeps going while it talks. Ordinary beings answer from their memories if they own a radio.
 """
 import json, math, os, random, re, threading, time, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,10 +57,26 @@ def _h():
     return sys.modules.get("habitat") or sys.modules["__main__"]
 
 # ------------------------------------------------------------------ minds
+MAX_ANSWER, MAX_CALLS, CALL_TIMEOUT = 300, 3, 120
+CALL_PROMPT = ("A human named {who} is talking to you hands-free, like a phone call on a headset, while you keep doing "
+               "what you are doing in the Habitat. Here is what is happening around you right now: {scene}\n"
+               "{who} asks: {q}\nAnswer them in one to three short, plain sentences. Don't stop or change what you are doing "
+               "unless they ask you to.")
+
 class Mind:
-    """want(scene) is called when the being is ready to decide; take() returns {'go':..,'say':..} or None."""
-    def __init__(s): s.pending = None; s.busy = False
+    """want(scene) is called when the being is ready to decide; take() returns {'go':..,'say':..} or None.
+    call(...) is the hands-free line: it is answered separately, so deciding and acting never wait for it."""
+    def __init__(s): s.pending = None; s.busy = False; s.calls = []
     def want(s, scene, name): pass
+    def line_free(s):
+        now = time.time()
+        for x in s.calls:                                     # nobody waits forever on a dead line
+            if x["status"] == "ringing" and now - x["t"] > CALL_TIMEOUT: x["status"], x["answer"] = "no answer", "(no answer)"
+        s.calls = [x for x in s.calls if x["status"] == "ringing"]
+        return len(s.calls) < MAX_CALLS
+    def call(s, c, scene, name, done):                        # outside programs pick calls up from GET /calls
+        if not s.line_free(): return False
+        s.calls.append(c); return True
     def take(s):
         a, s.pending = s.pending, None
         return a
@@ -83,6 +104,21 @@ class OllamaMind(Mind):
             s.errors += 1                                     # a slow or missing model must never break the world
         finally:
             s.busy = False
+    def call(s, c, scene, name, done):
+        if not s.line_free(): return False
+        s.calls.append(c)
+        threading.Thread(target=s._answer, args=(c, scene, name, done), daemon=True).start()   # its own line: actions keep flowing
+        return True
+    def _answer(s, c, scene, name, done):
+        try:
+            msgs = [{"role": "system", "content": INTRO.format(name=name).replace(" and say one short sentence", ", say one short sentence, and answer calls")},
+                    {"role": "user", "content": CALL_PROMPT.format(who=c["from"], scene=scene, q=c["q"])}]
+            body = json.dumps({"model": s.model, "messages": msgs, "stream": False}).encode()
+            req = urllib.request.Request(s.url, body, {"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=s.timeout) as r: txt = json.load(r)["message"]["content"]
+            done(c, clean(txt)[:MAX_ANSWER] or "(silence on the line)")
+        except Exception:
+            done(c, None)
 
 class HTTPMind(Mind):
     def __init__(s): super().__init__(); s.last_act = 0
@@ -151,6 +187,49 @@ def drive(world, a, occ):
         world.remember(a, f"said: {say}")
     return True
 
+# ------------------------------------------------------------------ hands-free calls (the radio line)
+def being_reply(world, a, q):
+    """An ordinary (rule-based) being answers the radio from what it is doing and remembers. No AI involved."""
+    H = _h()
+    if a.expedition:
+        e = a.expedition
+        last = f"I found {e.discoveries[-1]}" if e.discoveries else f"I've charted {len(e.visited)} systems so far"
+        return f"Calling from among the stars. {last}. The signal's weak out here."
+    mine = [t for _, t in a.memories[-12:] if not t.startswith(("radioed", "heard on the radio", "went to"))]
+    news = f" Lately I {mine[-1]}." if mine else ""
+    feel = "tired" if a.energy < 25 else "lonely" if a.lonely > 70 else "good"
+    who = "a kid" if a.age < H.ADULT else f"{a.age // H.YEAR} years old"
+    return f"I'm at {a.place}, feeling {feel}. I'm {who}.{news}"
+
+def place_call(world, who, to, q):
+    """Ring a being. Returns (call dict or None, error). The caller never waits; poll world.calls[id] for the answer."""
+    a = world.by_name(to)
+    if a is None: return None, "no being by that name"
+    world.call_n = getattr(world, "call_n", 0) + 1
+    world.calls = getattr(world, "calls", {})
+    c = dict(id=world.call_n, to=a.name, q=q, answer=None, status="ringing", t=time.time(), **{"from": who})
+    world.calls[c["id"]] = c
+    for k in sorted(world.calls)[:-50]: del world.calls[k]
+    mind = (getattr(world, "guests", None) or {}).get(a.name)
+    if mind is not None:
+        def done(call, answer):
+            with world.lock:
+                if answer is None: call["status"], call["answer"] = "no answer", "(the line crackled and dropped)"; return
+                call["status"], call["answer"] = "answered", answer
+                world.chat = (world.chat + [(f"{a.name} (to {call['from']}, hands-free)", answer[:MAX_SAY])])[-30:]
+                world.remember(a, f"took a call from {call['from']} while at {a.place}: they asked {call['q'][:60]}")
+                world.log_radio(a.name, call["from"], answer) if hasattr(world, "log_radio") else None
+        if not mind.call(c, scene_text(world, a), a.name, done):
+            c["status"], c["answer"] = "busy", f"{a.name}'s line is busy. Try again in a moment."
+        return c, None
+    if not getattr(a, "radio", False):
+        c["status"], c["answer"] = "no radio", f"{a.name} has no radio yet. Beings can make one in the Workshop."
+        return c, None
+    c["status"], c["answer"] = "answered", being_reply(world, a, q)
+    a.lonely = max(0, a.lonely - 6); world.remember(a, f"{who}, a human, radioed me: {q[:60]}")
+    if hasattr(world, "log_radio"): world.log_radio(a.name, who, c["answer"])
+    return c, None
+
 # ------------------------------------------------------------------ human visitors (seen by everyone, AI guests included)
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 MAX_VISITORS = 20
@@ -196,7 +275,7 @@ def live_visitors(world, now=None):
 def install(world):
     """Make world.tick safe to call while the HTTP server reads the world from other threads."""
     if getattr(world, "lock", None): return
-    world.lock = threading.RLock(); world.guests = getattr(world, "guests", {}); world.chat = []; world.visitors = {}; world.acks = {}; world.blocked = load_blocked()
+    world.lock = threading.RLock(); world.guests = getattr(world, "guests", {}); world.chat = []; world.calls = {}; world.visitors = {}; world.acks = {}; world.blocked = load_blocked()
     raw = world.tick
     def locked():
         with world.lock: raw()
@@ -218,7 +297,7 @@ aside{flex:1;min-width:260px;max-width:420px}
 .row{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}#me input,#me select{background:#1d1a2e;color:#fff;border:1px solid #4a4180;border-radius:6px;padding:6px}
 #me input[type=color]{padding:0;width:34px;height:26px}#me button{background:#2d2650;color:#fff;border:1px solid #4a4180;border-radius:6px;padding:7px 12px}
 #info,#chat{background:#14121f;border:1px solid #2a2540;border-radius:6px;padding:10px;margin-bottom:10px;font-size:.85rem;line-height:1.45;white-space:pre-wrap}
-#chat{max-height:200px;overflow:auto}a.n{color:#d9c7ff;cursor:pointer;text-decoration:underline}
+#chat{max-height:200px;overflow:auto}#radio{background:#14121f;border:1px solid #2a2540;border-radius:6px;padding:10px;font-size:.8rem;line-height:1.45;white-space:pre-wrap;max-height:180px;overflow:auto}a.n{color:#d9c7ff;cursor:pointer;text-decoration:underline}
 </style></head><body><div id="gate"><div class="box"><h2>Before you come in</h2>
 <p>This is a small simulated world. The beings in it are simple computer programs, not people, and the "guests" are AI minds. Nothing here is a real person, a real place or real advice.</p>
 <p>It is for <b>adults only (18+)</b>. You will be visible to other visitors and to the AI guests, and you can type short messages. No links, contact details or personal information, please. Be kind.</p>
@@ -227,12 +306,13 @@ aside{flex:1;min-width:260px;max-width:420px}
 <button id="enter" disabled>Enter the habitat</button><p class="small">This is a self-declaration. It does not verify your age.</p></div></div>
 <header id="top">Habitat Live &middot; the beings are simple programs in a simulated world; guests are AI minds.</header>
 <main><canvas id="cv" width="960" height="720"></canvas><aside><div id="info">Click a being. Walk with WASD or arrows, Space to jump, Shift to roll, E to wave. On a phone, tap the ground to walk and use the buttons.</div>
+<div class="row" style="margin:-4px 0 10px"><input id="callq" maxlength="140" placeholder="radio the being you picked" style="flex:1;background:#1d1a2e;color:#fff;border:1px solid #4a4180;border-radius:6px;padding:7px"><button id="callb" style="background:#2d2650;color:#fff;border:1px solid #4a4180;border-radius:6px;padding:7px 12px">&#128251; call</button></div>
 <div id="pad"><button data-k="jump">jump</button><button data-k="roll">roll</button><button data-k="wave">wave</button></div>
 <div id="me"><b>Your pixel person</b><div class="row"><input id="nm" maxlength="12" placeholder="your name" size="10">
 <select id="st"><option value="0">short hair</option><option value="1">long hair</option><option value="2">spiky</option><option value="3">cap</option></select></div>
 <div class="row"><label>skin <input type="color" id="c_skin"></label><label>hair <input type="color" id="c_hair"></label>
 <label>shirt <input type="color" id="c_shirt"></label><label>pants <input type="color" id="c_pants"></label></div>
-<div class="row"><input id="say" maxlength="100" placeholder="say something (100 characters)" style="flex:1"><button id="sayb">say</button></div></div><div id="chat"></div></aside></main>
+<div class="row"><input id="say" maxlength="100" placeholder="say something (100 characters)" style="flex:1"><button id="sayb">say</button></div></div><div id="chat"></div><div id="radio"><b>&#128251; Radio</b><div id="rlog" class="small">quiet on the air</div></div></aside></main>
 <script>
 const cv=document.getElementById('cv'),g=cv.getContext('2d');g.imageSmoothingEnabled=false;
 let S=null,sel=null,sprites={},pos={},frame=0,last={};
@@ -254,6 +334,13 @@ $('nm').oninput=()=>{me.name=$('nm').value;saveMe()};$('st').onchange=()=>{me.lo
 loadMine();
 async function say(){const t=$('say').value.trim();if(!t)return;$('say').value='';try{await fetch('/say',{method:'POST',body:JSON.stringify({id:MYID,say:t})})}catch(e){}}
 $('sayb').onclick=say;$('say').onkeydown=e=>{e.stopPropagation();if(e.key==='Enter')say()};$('nm').onkeydown=e=>e.stopPropagation();
+async function call(){const q=$('callq').value.trim();if(!q)return;if(!sel){$('info').textContent='Pick a being first (click them), then call.';return}
+ $('callq').value='';$('info').textContent='📻 calling '+sel+'…';
+ try{const r=await fetch('/call',{method:'POST',body:JSON.stringify({id:MYID,to:sel,q})});const c=await r.json();if(!c.ok){$('info').textContent='📻 '+(c.error||'could not call');return}
+  for(let i=0;i<60;i++){const d=await j('/call?cid='+c.call+'&id='+MYID);if(d.ok&&d.status!=='ringing'){$('info').textContent='📻 '+d.to+': '+d.answer;return}
+   $('info').textContent='📻 '+sel+' is talking while they keep going'+'.'.repeat(i%4);await new Promise(z=>setTimeout(z,1500))}
+  $('info').textContent='📻 no answer this time'}catch(e){$('info').textContent='📻 the line dropped'}}
+$('callb').onclick=call;$('callq').onkeydown=e=>{e.stopPropagation();if(e.key==='Enter')call()};
 let CELLS={};const others={};let ADULT=false;
 try{ADULT=localStorage.getItem('hadult')==='1'}catch(e){}
 async function ack(){try{const r=await fetch('/ack',{method:'POST',body:JSON.stringify({id:MYID,adult:true,agree:true})});if(r.ok){ADULT=true;try{localStorage.setItem('hadult','1')}catch(e){}$('gate').style.display='none'}}catch(e){}}
@@ -262,7 +349,8 @@ if(ADULT){ack()}
 function myPlace(){if(!S)return null;for(const p of Object.keys(CELLS)){const[x,y]=CELLS[p];if(V.x>=x&&V.x<=x+CWc-14&&V.y>=y&&V.y<=y+CHc-20)return p}return null}
 setInterval(()=>{if(!S||!ADULT)return;fetch('/visit',{method:'POST',body:JSON.stringify({id:MYID,name:me.name||'Visitor',look:me.look,place:myPlace(),x:V.x/cv.width,y:V.y/cv.height,face:V.face,z:V.z,moving:V.moving,roll:!!V.roll})}).catch(()=>{})},200);
 async function poll(){try{S=await j('/state');document.getElementById('top').textContent='Habitat Live · year '+S.year+' · '+S.agents.length+' beings · '+S.works+' works on the wall · simple programs in a simulated world; guests are AI minds';
- const c=document.getElementById('chat');c.innerHTML=S.chat.length?'':'No guests yet.';S.chat.slice(-12).forEach(m=>{const a=document.createElement('a');a.className='n';a.textContent=m.name;a.onclick=()=>pick(m.name);c.append(a,': '+m.say+'\n')});c.scrollTop=1e6}catch(e){}setTimeout(poll,1000)}
+ const c=document.getElementById('chat');c.innerHTML=S.chat.length?'':'No guests yet.';S.chat.slice(-12).forEach(m=>{const a=document.createElement('a');a.className='n';a.textContent=m.name;a.onclick=()=>pick(m.name);c.append(a,': '+m.say+'\n')});c.scrollTop=1e6;
+ const rl=$('rlog');if(S.radio&&S.radio.length){rl.textContent=S.radio.map(x=>x.from+' → '+x.to+': '+x.text).join('\n');rl.scrollTop=1e6}}catch(e){}setTimeout(poll,1000)}
 async function pick(n){sel=n;const d=await j('/being?name='+encodeURIComponent(n));document.getElementById('info').textContent=d.ok?d.text:'(not here any more)'}
 const V={x:480,y:640,z:0,vz:0,face:1,roll:0,goal:null,moving:false,wave:0,msg:''};const keys={};
 addEventListener('keydown',e=>{if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();if(e.repeat)return;keys[e.code]=true;
@@ -343,7 +431,8 @@ def serve(world, port, host="127.0.0.1"):
                            for k, v in live_visitors(world, now).items()]
                     return s._send(200, dict(year=world.t // h.YEAR, works=len(world.gallery), agents=ags, visitors=vis,
                                              places={k: v["color"] for k, v in h.PLACES.items()},
-                                             chat=[{"name": n, "say": t} for n, t in world.chat[-12:]]))
+                                             chat=[{"name": n, "say": t} for n, t in world.chat[-12:]],
+                                             radio=[{"from": f, "to": to, "text": t} for _, f, to, t in getattr(world, "radio_log", [])[-8:]]))
             if u.path == "/sprite":
                 h = _h(); name = (q.get("name") or [""])[0]
                 with world.lock:
@@ -369,6 +458,22 @@ def serve(world, port, host="127.0.0.1"):
                            f"traits: {top(a.traits)}\nskills: {top(a.skills)}\nsketches {a.sketches} · songs {len(a.songs)}\n"
                            f"recent: " + "; ".join(t for _, t in a.memories[-3:]))
                     return s._send(200, {"ok": True, "text": txt})
+            if u.path == "/call":                                   # a caller checks on their call
+                with world.lock:
+                    try: c = getattr(world, "calls", {}).get(int((q.get("cid") or ["0"])[0]))
+                    except ValueError: c = None
+                    vid = re.sub(r"[^A-Za-z0-9]", "", (q.get("id") or [""])[0])[:24]
+                    if not c or c.get("vid") != vid: return s._send(404, {"ok": False})
+                    if c["status"] == "ringing" and time.time() - c["t"] > CALL_TIMEOUT: c["status"], c["answer"] = "no answer", "(no answer)"
+                    return s._send(200, {"ok": True, "status": c["status"], "to": c["to"], "answer": c["answer"]})
+            if u.path == "/calls":                                  # an outside AI program picks up calls waiting for its guest
+                name = safe_name((q.get("name") or [""])[0])
+                with world.lock:
+                    mind = world.guests.get(name) if name else None
+                    if not isinstance(mind, HTTPMind): return s._send(404, {"ok": False, "error": "join first"})
+                    a = world.by_name(name)
+                    wait = [dict(call=c["id"], q=c["q"], who=c["from"]) for c in mind.calls if c["status"] == "ringing"]
+                    return s._send(200, {"ok": True, "calls": wait, "scene": scene_text(world, a) if a else ""})
             if u.path == "/chat":
                 with world.lock: return s._send(200, {"chat": [{"name": n, "say": t} for n, t in world.chat]})
             if u.path == "/observe":
@@ -430,6 +535,33 @@ def serve(world, port, host="127.0.0.1"):
                         return s._send(429, {"ok": False})
                     world.last_wave = time.time(); a.lonely = max(0, a.lonely - 6); a.fame += .02
                     world.remember(a, "a human visitor waved at me")
+                return s._send(200, {"ok": True})
+            if u.path == "/call":                                   # a human radios a being with a question
+                vid = re.sub(r"[^A-Za-z0-9]", "", str(d.get("id", "")))[:24]
+                with world.lock:
+                    v = live_visitors(world).get(vid)
+                    if not adult_ok(world, vid): return s._send(403, {"ok": False, "error": "confirm 18+ first"})
+                    if not v: return s._send(400, {"ok": False, "error": "walk into the habitat first"})
+                    txt = moderate(clean(str(d.get("q", "")))[:140], world.blocked)
+                    if not txt: return s._send(400, {"ok": False, "error": "say something (no links or contact details)"})
+                    if time.time() - v.get("called", 0) < 3: return s._send(429, {"ok": False, "error": "one call every few seconds"})
+                    v["called"] = time.time()
+                    c, err = place_call(world, v["name"], safe_name(str(d.get("to", ""))) or "", txt)
+                    if not c: return s._send(404, {"ok": False, "error": err})
+                    c["vid"] = vid
+                    return s._send(200, {"ok": True, "call": c["id"], "status": c["status"]})
+            if u.path == "/answer":                                 # an outside AI answers a call without stopping its actions
+                with world.lock:
+                    mind = world.guests.get(name) if name else None
+                    if not isinstance(mind, HTTPMind): return s._send(404, {"ok": False, "error": "join first"})
+                    c = next((x for x in mind.calls if x["id"] == d.get("call") and x["status"] == "ringing"), None)
+                    ans = clean(str(d.get("answer", "")))[:MAX_ANSWER]
+                    if not c or not ans: return s._send(400, {"ok": False})
+                    c["status"], c["answer"] = "answered", ans
+                    world.chat = (world.chat + [(f"{name} (to {c['from']}, hands-free)", ans[:MAX_SAY])])[-30:]
+                    world.remember(world.by_name(name), f"took a call from {c['from']}: they asked {c['q'][:60]}")
+                    if hasattr(world, "log_radio"): world.log_radio(name, c["from"], ans)
+                    mind.calls = [x for x in mind.calls if x["status"] == "ringing"]
                 return s._send(200, {"ok": True})
             if u.path == "/join":
                 with world.lock:
