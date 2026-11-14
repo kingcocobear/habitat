@@ -13,12 +13,86 @@ import html, json, math, random
 GRAPHITE, SOFT, PAPER = "#34333b", "#77757f", "#f1e9d6"
 W, H = 200, 150
 
-# ---------------------------------------------------------------- pencil helpers
+# ---------------------------------------------------------------- the pencil
+# One pencil, many looks (same model as the Pencil Lab page, pencil_lab.html):
+#   pressure  -> how wide and how dark a stroke goes, and how deep into the paper grain it reaches
+#   curve     -> how pressure turns into graphite (low = dark fast, high = long smooth gradient)
+#   softness  -> grade: soft (B) pencils can go much darker than hard (H) ones
+#   tilt      -> side of the lead: wider, softer, lighter strokes
+#   sharpness -> a worn pencil draws fatter lines
+# Light pressure only catches the tops of the paper's grain, so it looks airy; heavy pressure fills the grain in.
+# Every artist has their own pencil (from their name). Skilled artists vary their pressure more on purpose.
+# A human can hand everyone a pencil: tune it in pencil_lab.html, press "Copy settings", save as pencil.json,
+# and run habitat.py with --pencil pencil.json. Each being still holds it a little differently.
+
+HOUSE_PENCIL = None
+_PEN = None                        # the pencil of the sketch being drawn right now (None = plain lines)
+
+GRADES = ["9H", "8H", "7H", "6H", "5H", "4H", "3H", "2H", "H", "F", "HB", "B", "2B", "3B", "4B", "5B", "6B", "7B", "8B", "9B", "9B+"]
+
+def set_house_pencil(settings):
+    """Accepts the Pencil Lab's copied JSON ({"pencil": {...}}) or the inner dict. Returns the pencil used."""
+    global HOUSE_PENCIL
+    p = settings.get("pencil", settings) if isinstance(settings, dict) else {}
+    def num(k, d, lo, hi):
+        try: return min(hi, max(lo, float(p.get(k, d))))
+        except (TypeError, ValueError): return d
+    soft = GRADES.index(p["grade"]) / 20 if p.get("grade") in GRADES else .55
+    HOUSE_PENCIL = dict(soft=num("softness", soft, 0, 1),
+                        hand=num("hand", .55, .05, 1), curve=num("pressure_curve", 1.2, .35, 3),
+                        tilt=num("tilt", 0, 0, 1), sharp=num("sharpness", .85, 0, 1))
+    return HOUSE_PENCIL
+
+def pencil_for(pc):
+    """The artist's own pencil. Same artist, same pencil, sketch after sketch (only wear changes)."""
+    r = random.Random("pencil:" + pc.get("artist", ""))
+    skill = min(1, pc.get("skill", 0))
+    if HOUSE_PENCIL:
+        hp = HOUSE_PENCIL; j = lambda v, a, lo, hi: min(hi, max(lo, v + r.uniform(-a, a)))
+        pen = dict(soft=j(hp["soft"], .08, 0, 1), hand=j(hp["hand"], .1, .1, 1), curve=j(hp["curve"], .15, .35, 3),
+                   tilt=j(hp["tilt"], .08, 0, 1), sharp=hp["sharp"])
+    else:
+        pen = dict(soft=r.uniform(.15, .95), hand=r.uniform(.35, .85), curve=r.uniform(.7, 1.8),
+                   tilt=r.choice([0, 0, 0, .2, .5]), sharp=r.uniform(.5, 1))
+    if "pencil_left" in pc:                                   # a pencil lasts 25 sketches, then a fresh one
+        pen["sharp"] = min(pen["sharp"], .25 + .75 * max(0, pc["pencil_left"]) / 25)
+    pen["spread"] = .08 + .27 * skill                         # how much the artist varies pressure on purpose
+    pen["grade"] = GRADES[round(pen["soft"] * 20)]
+    pen["rng"] = random.Random(pc.get("seed", 0) * 7 + 1)     # separate from the scene's dice, so compositions stay the same
+    return pen
+
+GRAIN = ('<defs>'
+         '<filter id="pg-light" filterUnits="userSpaceOnUse" x="0" y="0" width="200" height="150">'
+         '<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7" result="n"/>'
+         '<feColorMatrix in="n" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5.5 0 0 0 -2.95" result="m"/>'
+         '<feComposite in="SourceGraphic" in2="m" operator="in"/></filter>'
+         '<filter id="pg-mid" filterUnits="userSpaceOnUse" x="0" y="0" width="200" height="150">'
+         '<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7" result="n"/>'
+         '<feColorMatrix in="n" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5 0 0 0 -2.1" result="m"/>'
+         '<feComposite in="SourceGraphic" in2="m" operator="in"/></filter></defs>')
+
+def _pressed(w, op, emphasis=1.0):
+    """Width, opacity and grain for one stroke drawn with the current pencil."""
+    pen = _PEN
+    p = min(1, max(.04, pen["hand"] * emphasis + pen["rng"].gauss(0, pen["spread"])))
+    pe = p ** pen["curve"]                                     # pressure after the artist's curve
+    width = w * (.7 + .6 * pe) * (1 + 1.6 * pen["tilt"]) * (1.35 - .45 * pen["sharp"])
+    dark = (.32 + .66 * pen["soft"]) * (.35 + .65 * pe) * (1 - .3 * pen["tilt"])
+    opac = min(1, op * (.55 + .7 * dark))
+    reach = pe * (.85 + .3 * pen["soft"]) * (1 - .4 * pen["tilt"])
+    grain = "pg-light" if reach < .35 else "pg-mid" if reach < .7 else ""
+    return width, opac, grain
+
 def _p(pts, r, jit, color, w=1.1, op=.85, close=False, fill="none"):
     pts = [(x + r.uniform(-jit, jit), y + r.uniform(-jit, jit)) for x, y in pts]
     d = "M%.1f %.1f" % pts[0] + "".join(" L%.1f %.1f" % q for q in pts[1:]) + (" Z" if close else "")
+    flt = ""
+    if _PEN and color in (GRAPHITE, SOFT):                     # graphite strokes go through the pencil; colour washes don't
+        w, op, g = _pressed(w, op, .75 if color == SOFT else 1.0)
+        if g: flt = f' filter="url(#{g})"'
+        w, op = round(w, 2), round(op, 2)
     return (f'<path d="{d}" fill="{fill}" stroke="{color}" stroke-width="{w}" '
-            f'stroke-linecap="round" stroke-linejoin="round" opacity="{op}"/>')
+            f'stroke-linecap="round" stroke-linejoin="round" opacity="{op}"{flt}/>')
 
 def line(r, a, b, jit, color=GRAPHITE, w=1.1):
     return _p([a, b], r, jit, color, w) + _p([a, b], r, jit, color, w * .6, .5)      # sketchy double stroke
@@ -180,15 +254,20 @@ SCENES = {"The Shore": scene_shore, "Observatory": scene_sky, "The Grove": scene
 ALIEN = "among the stars"
 
 def sketch_svg(pc):
+    global _PEN
     r = random.Random(pc["seed"]); skill, cre = pc.get("skill", 0), pc.get("creativity", .5)
     j = 2.4 * (1 - .8 * min(1, skill)); n = 3 + int(cre * 6); ac = pc.get("accent", "#a98bff")
     fn = SCENES.get(pc["place"])
-    if pc["place"] == ALIEN: body = scene_alien(r, j, n, ac, pc["title"])
-    elif fn: body = fn(r, j, n, ac)
-    else: body = scene_wilds(r, j, n, ac, pc["title"])
+    _PEN = pencil_for(pc)
+    try:
+        if pc["place"] == ALIEN: body = scene_alien(r, j, n, ac, pc["title"])
+        elif fn: body = fn(r, j, n, ac)
+        else: body = scene_wilds(r, j, n, ac, pc["title"])
+    finally:
+        grade = _PEN["grade"]; _PEN = None
     sig = html.escape(pc["artist"])
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Pencil sketch: {html.escape(pc["title"])}, by {sig}">'
-            f'<rect width="{W}" height="{H}" fill="{PAPER}"/>{body}'
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Pencil sketch ({grade}): {html.escape(pc["title"])}, by {sig}">'
+            f'{GRAIN}<rect width="{W}" height="{H}" fill="{PAPER}"/>{body}'
             f'<text x="192" y="144" text-anchor="end" font-size="7" font-style="italic" fill="{SOFT}" '
             f'font-family="Georgia,serif">{sig}</text></svg>')
 

@@ -326,6 +326,7 @@ class World:
         a.fame += .05
         q = .5 * ds + .3 * a.traits["creativity"] + .25 * random.random() + bonus
         extra = {"inspired_by": inspired} if inspired else {}
+        extra["pencil_left"] = max(0, a.pencil)           # the gallery draws worn pencils with fatter lines
         if q > .34 and s.hang(a, "sketch", what, pn, q, **extra):
             s.feel(a, pn, 1)
             if random.random() < .5:
@@ -847,12 +848,20 @@ if __name__ == "__main__":
     ap.add_argument("--save", metavar="FILE", help="save the world here (on exit, and every 2000 ticks in the window)")
     ap.add_argument("--load", metavar="FILE", help="resume a saved world")
     ap.add_argument("--gallery", metavar="FILE", help="write the beings' art gallery as a web page (open it in any browser)")
+    ap.add_argument("--pencil", metavar="FILE", help="hand every artist your pencil: settings copied from pencil_lab.html, saved as JSON")
     ap.add_argument("--ai", metavar="MODEL", help="let a local Ollama model (e.g. olmo2:7b) live in the world as a guest being")
     ap.add_argument("--ai-names", default="Olmo", help="comma-separated names for the guest beings (default Olmo)")
     ap.add_argument("--ollama-url", default="http://localhost:11434/api/chat")
     ap.add_argument("--serve", type=int, metavar="PORT", help="open a localhost door so other AI programs can join as guests")
     ap.add_argument("--pace", type=float, default=0, help="with --headless: seconds to wait per tick (so guests can keep up)")
     args = ap.parse_args()
+    if args.pencil:
+        if not GALLERY: raise SystemExit("--pencil needs gallery.py next to habitat.py")
+        try:
+            with open(args.pencil, encoding="utf-8") as f: pen = GALLERY.set_house_pencil(json.load(f))
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"Could not read pencil settings '{args.pencil}': {e}")
+        print(f"everyone draws with your pencil now ({GALLERY.GRADES[round(pen['soft'] * 20)]}, curve {pen['curve']:.2f})")
     try:
         w = World.load(args.load) if args.load else World(args.seed, args.agents)
     except (OSError, ValueError, KeyError) as e:
