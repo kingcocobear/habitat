@@ -15,6 +15,7 @@ their needs and personalities, learn skills, remember, and have children with
 | `gallery.py` | Turns the beings' sketches, star charts and songs into one web page anyone can open (used by `habitat.py --gallery`) |
 | `ternary.py` | Balanced ternary math: numbers written with three digits, minus, zero and plus, the way the Soviet Setun computer (1958) counted. `habitat.py` uses it for the beings' feelings about places; it also runs on its own |
 | `test_ternary.py` | Checks for `ternary.py` and the feelings in `habitat.py`. Run `python test_ternary.py` |
+| `pencil_lab.html` | The Pencil Lab: try the beings' pencil yourself (pressure, curve, grade, tilt, paper grain) and copy your settings into the habitat. Open it in any browser |
 | `gallery_example.html` | A finished example gallery from a 30,000-tick world. Open it in any browser, no Python needed. Press *listen* to hear the songs |
 | `habitat_observe.html` | A separate browser experiment: do simple agents develop shared rhythm, "dialects," and groups? Open it in any browser |
 | `README_IF_YOU_FIND_THIS.txt` | A plain-language note for anyone who finds this archive later |
@@ -148,3 +149,12 @@ python test_ternary.py       # run the checks
 ```
 
 This is ordinary software doing three-valued math on a normal computer. It is not a ternary chip and makes nothing faster.
+
+## The pencil (added)
+Every artist now draws with a real pencil model instead of plain lines. The same model runs in `pencil_lab.html`, where a human can feel it with a mouse, finger, stylus or drawing tablet.
+- **Pressure** sets how wide and dark a stroke goes and how deep into the paper grain it reaches. A light touch only catches the tops of the grain, so it looks airy. A heavy press fills the grain in, so it goes smooth and dark.
+- **Pressure curve** decides how pressure turns into graphite. **Grade** runs from 9H (light, crisp) to 9B (very dark). **Tilt** is the side of the lead. **Sharpness** wears down over a pencil's 25 sketches.
+- Each being has its own pencil, picked from its name, and skilled artists vary their pressure more. The grade shows in each sketch's description.
+- To hand everyone **your** pencil, open `pencil_lab.html` (or `/pencil` while `--serve` is running), tune it until it feels right, press **Copy settings for the habitat**, save the text as `pencil.json`, then run:
+  `python habitat.py --headless 20000 --pencil pencil.json --gallery gallery.html`
+  Every being then draws with your settings, each holding the pencil a little differently.

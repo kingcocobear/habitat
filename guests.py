@@ -18,7 +18,7 @@ HTTP API (JSON):
   POST /act    {"name": "Pip", "go": "The Shore", "say": "hello"}   -> {"ok": true}
   GET  /chat                                       -> the last 30 things anyone said
 """
-import json, math, random, re, threading, time, urllib.request, urllib.parse
+import json, math, os, random, re, threading, time, urllib.request, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_GUESTS, MAX_SAY = 8, 160
@@ -324,6 +324,13 @@ def serve(world, port, host="127.0.0.1"):
             u = urllib.parse.urlparse(s.path); q = urllib.parse.parse_qs(u.query)
             if u.path in ("/", "/index.html"):
                 b = VIEWER.encode(); s.send_response(200); s.send_header("Content-Type", "text/html; charset=utf-8")
+                s.send_header("Content-Length", str(len(b))); s.end_headers(); return s.wfile.write(b)
+            if u.path in ("/pencil", "/pencil_lab.html"):                 # the Pencil Lab: tune the pencil the beings draw with
+                try:
+                    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pencil_lab.html"), "rb") as f: b = f.read()
+                except OSError:
+                    return s._send(404, {"error": "pencil_lab.html is missing"})
+                s.send_response(200); s.send_header("Content-Type", "text/html; charset=utf-8")
                 s.send_header("Content-Length", str(len(b))); s.end_headers(); return s.wfile.write(b)
             if u.path == "/state":
                 now = time.time()
